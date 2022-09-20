@@ -6,25 +6,18 @@ import win32con
 import win32api
 import win32ui
 import win32com.client
-#import win32com.client as wincl
 from ctypes import windll
 import time
-#import datetime
 import pytesseract
 import cv2
-#from skimage.metrics import structural_similarity;
 import numpy as np
 import PIL
 import os
-#from random import randint
-#import threading
-#from itertools import cycle, chain
 import keyboard as kb
-#import operator
-#from difflib import SequenceMatcher
 import re
 from pynput import keyboard
 from math import sqrt
+
 # data
 from collections import deque
 import winsound
@@ -47,11 +40,13 @@ from client_manager import *
 # endregion
 
 class Bot():
+    
     def __init__(self):
         self.base_directory = os.getcwd()
         self.original_title,self.hwnd = attachToClient()
         
-        self.updateWindowCoordinates()
+        self.left, self.top, self.right, self.bottom = win32gui.GetWindowRect(self.hwnd)
+        self.actionbar_moved = {'color': False}
         
         self.s_Stop = ScreenElement("Stop",self.hwnd,'stop.png',lambda w,h: (w - 200, 0 , w, int(h/2)))
         
@@ -91,26 +86,44 @@ class Bot():
         self.mp_thresh = 30
         self.hp_thresh_hi = 90
         self.hp_thresh_lo = 70
+        
+    def maximizeWindow(self):
+        tup = win32gui.GetWindowPlacement(self.hwnd)
+        if tup[1] == win32con.SW_SHOWMINIMIZED:
+            win32gui.ShowWindow(self.hwnd, win32con.SW_MAXIMIZE)
+            time.sleep(0.2)
     
     def updateWindowCoordinates(self):
-        print(win32gui.GetWindowRect(self.hwnd))
-        self.left, self.top, self.right, self.bottom = win32gui.GetWindowRect(self.hwnd)
-        self.height = abs(self.bottom - self.top)
-        self.width = abs(self.right - self.left)
-        
-    def updateElements(self):
+        self.maximizeWindow()
+        l, t, r, b = win32gui.GetWindowRect(self.hwnd)
+        if (self.left, self.top, self.right, self.bottom) != (l, t, r, b):
+            print("window rect changed")
+            self.left, self.top, self.right, self.bottom = l, t, r, b
+            self.height = abs(self.bottom - self.top)
+            self.width = abs(self.right - self.left)
+            bot.updateAllElements()
+        else:
+            if self.checkActionbarMoved():
+                print("actionbar moved")
+                bot.updateBoundElements()
+    def checkNotDetectedElements(self):
         for elem_type in self.ElementsLists:
             for elem in elem_type:
-                #print(elem.name)
+                if not elem.detected:
+                    print("not detected: "+elem.name)
+                    return True
+        return False
+    def updateAllElements(self):
+        for elem_type in self.ElementsLists:
+            for elem in elem_type:
                 if elem_type == self.ScreenElements:
                     if not elem.update():
-                        pass
+                        elem.update()
                 elif elem_type == self.BoundScreenElements:
                     if not elem.update():
                         pass
                     else:
                         pass
-                        #elem.visualize()
                 elif elem_type == self.ScreenWindows:
                     while not elem.update():
                         if elem.button_position:
@@ -123,7 +136,54 @@ class Bot():
                 elif elem_type == self.RelativeScreenElements:
                     if not elem.update():
                         pass
-                    
+    def updateNotDetectedElements(self):
+        for elem_type in self.ElementsLists:
+            for elem in elem_type:
+                if elem_type != self.ScreenWindows:
+                    if not elem.detected:
+                        elem.update()
+                else:
+                    while not elem.detected:
+                        elem.update()
+                        if elem.button_position:
+                            print("clicking button for window: "+ elem.name + " position: "+str(elem.button_position))
+                            self.clickWindowButton(elem.button_position)
+                            time.sleep(0.5)
+                        else:
+                            print("window button position is None")
+                            break      
+                        
+    def updateBoundElements(self):
+        for elem in self.BoundScreenElements:
+            elem.update()
+            
+    def checkActionbarMoved(self):
+        if self.s_ActionBar.detected:
+            #(117, 117, 117) at (-14,81) and (-13,81)
+            #(120, 120, 120) at (-12,81)
+            x,y,_,_ = self.s_ActionBar.region
+            dx = -14
+            dy = 82
+            x += dx
+            y += dy
+            #colors = {(117, 117, 117) : [] ,(120, 120, 120) : []}
+            
+            pixel_color = img.GetPixelRGBColor(self.hwnd, (x,y))
+            if pixel_color != (117,117,117):
+                print(pixel_color)
+                return True
+        return False
+        '''
+        if type(self.actionbar_moved['color']) is bool:
+            #not yet initialized
+            self.actionbar_moved['color'] = img.GetPixelRGBColor(self.hwnd, (x,y))
+            return False
+        else:
+            pixel_color = img.GetPixelRGBColor(self.hwnd, (x,y))
+            if self.actionbar_moved['color'] != pixel_color:
+                return True
+        '''
+        
     def clickWindowButton(self,pos):
         '''pos: starts from 1'''
         region = self.s_WindowButtons.region
@@ -148,7 +208,7 @@ class Bot():
         y = self.s_ActionBar.region[1]
         x = self.s_ActionBar.region[0]+(box_width*(pos))+2*pos
         return (x,y)
-    def checkActionBar(self,pos):
+    def checkActionBarSlotCooldown(self,pos):
 
         x,y = self.getActionbarSlotPosition(pos)
         x2,y2 = x+34,y+34
@@ -253,7 +313,6 @@ class Bot():
         x = _x+25#x = _x+12  # constant
         first_pos = _y+30  # about mid of first square
         d = 22  # dist between boxes, 19+3
-        prev_y = first_pos
         if not self.isAttacking() and not self.buffs['pz']:
             for y in range(first_pos, _y2, d):
                     color = img.GetPixelRGBColor(self.hwnd,(x, y))
@@ -272,10 +331,17 @@ if __name__ == "__main__":
     
     bot = Bot()
     
-    bot.updateElements()
+    bot.updateAllElements()
     loop = True
+    
     while(loop):
-        
+        bot.updateWindowCoordinates()
+        if (bot.checkNotDetectedElements()):
+            print("not detected elements, updating")
+            bot.updateNotDetectedElements()
+            time.sleep(1)
         bot.manageVitals()
         bot.getBuffs()
         bot.attack()
+        
+        

@@ -35,6 +35,8 @@ class BaseElement(ABC):
     def updateSearchRegion(self):
         w,h = self.getGameDimensions()
         self.search_region = self.search_region_function(w,h)
+    def setNotDetected(self):
+        self.detected = False
 class BoundScreenElement(BaseElement):
     def __init__(self, name,hwnd,search_image_start, search_image_end,search_region_start_function = lambda w,h: (0,0,0,0),search_region_end_function = lambda w,h: (0,0,0,0),start_offsets = (0,0), end_offsets = (0,0)):
         self.search_image_start = search_image_start
@@ -52,6 +54,7 @@ class BoundScreenElement(BaseElement):
         found_start = img.locateImage(self.hwnd, self.search_image_start, region_start, 0.96)
         found_end = img.locateImage(self.hwnd,self.search_image_end, region_end, 0.96)
         if not found_start or not found_end:
+            self.detected = False
             print("couldn't find BoundScreenElement "+ self.name+ " start or end")
             return False
         x1, y1, width, height = found_start
@@ -73,6 +76,7 @@ class ScreenElement(BaseElement):
         super().__init__(name,hwnd,search_image,search_region_function)
         
     def update(self):
+        self.updateSearchRegion()
         found = img.locateImage(self.hwnd, self.search_image, self.search_region, 0.96)
         if found:
             x2, y2, img_w , img_h = found
@@ -139,5 +143,6 @@ class RelativeScreenElement(BaseElement):
         
     def update(self):
         self.region = tuple(map(operator.add, self.element.region, self.offsets))
-        return True
+        self.detected = self.element.detected
+        return self.detected
         
