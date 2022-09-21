@@ -46,11 +46,14 @@ class Bot():
         self.original_title,self.hwnd = attachToClient()
         
         self.left, self.top, self.right, self.bottom = win32gui.GetWindowRect(self.hwnd)
+        self.height = abs(self.bottom - self.top)
+        self.width = abs(self.right - self.left)
         self.actionbar_moved = {'color': False}
         
         self.s_Stop = ScreenElement("Stop",self.hwnd,'stop.png',lambda w,h: (w - 200, 0 , w, int(h/2)))
         
         self.s_ActionBar = BoundScreenElement("ActionBar",self.hwnd,'action_bar_start.png','action_bar_end.png',lambda w,h: (0, int(h/4), int(w/3), h),lambda w,h: (int(2*w/3), int(h/4), w, h),(2,0))
+        self.s_GameScreen = GameScreenElement("GameScreen",self.hwnd,'hp_start.png','action_bar_end.png',lambda w,h: (150, 0, 300, 150),lambda w,h: (int(2*w/3), int(h/4), w, h),(2,0))
         
         self.s_BattleList = ScreenWindow("BattleList",self.hwnd,'battle_list.png',2)
         self.s_Skills = ScreenWindow("Skills",self.hwnd,'skills.png',1)
@@ -65,7 +68,7 @@ class Bot():
         self.s_WindowButtons = RelativeScreenElement("WindowButtons",self.hwnd,self.s_Stop,(-118,71,-52,164))
         
         self.ScreenElements = [self.s_Stop]
-        self.BoundScreenElements = [self.s_ActionBar]
+        self.BoundScreenElements = [self.s_GameScreen,self.s_ActionBar]
         self.ScreenWindows = [self.s_BattleList,self.s_Skills,self.s_Party]
         self.RelativeScreenElements = [self.s_Map,self.s_Bless,self.s_Buffs,self.s_Health,self.s_Mana,self.s_Capacity,self.s_WindowButtons]
         #element order is important
@@ -84,33 +87,34 @@ class Bot():
         self.rune_heal_hotkey = False
         self.mana_hotkey = 'F3'
         self.mp_thresh = 30
+        
         self.hp_thresh_hi = 90
         self.hp_thresh_lo = 70
         
-    def maximizeWindow(self):
-        tup = win32gui.GetWindowPlacement(self.hwnd)
-        if tup[1] == win32con.SW_SHOWMINIMIZED:
-            win32gui.ShowWindow(self.hwnd, win32con.SW_MAXIMIZE)
-            time.sleep(0.2)
     
     def updateWindowCoordinates(self):
-        self.maximizeWindow()
+        maximizeWindow(self.hwnd)
         l, t, r, b = win32gui.GetWindowRect(self.hwnd)
         if (self.left, self.top, self.right, self.bottom) != (l, t, r, b):
             print("window rect changed")
             self.left, self.top, self.right, self.bottom = l, t, r, b
             self.height = abs(self.bottom - self.top)
             self.width = abs(self.right - self.left)
-            bot.updateAllElements()
+            self.updateAllElements()
         else:
             if self.checkActionbarMoved():
                 print("actionbar moved")
-                bot.updateBoundElements()
-    def checkNotDetectedElements(self):
+                self.updateBoundElements()
+    
+    def checkAndDetectElements(self):
+        if (bot.checkAnyUndetectedElements()):
+            print("elements not detected, updating")
+            bot.updateNotDetectedElements()
+            time.sleep(1)
+    def checkAnyUndetectedElements(self):
         for elem_type in self.ElementsLists:
             for elem in elem_type:
                 if not elem.detected:
-                    print("not detected: "+elem.name)
                     return True
         return False
     def updateAllElements(self):
@@ -222,7 +226,8 @@ class Bot():
             return False
         #print("pos "+str(pos) + " is NOT on cooldown")
         return True
-    
+    def getGameRegion(self):
+        img.screengrab_array(self.hwnd,(self.left,self.top,self.width,self.height),True)
     def getVitals(self):
         #returns hp % and mp % in a tuple
         hppc = 0
@@ -332,16 +337,18 @@ if __name__ == "__main__":
     bot = Bot()
     
     bot.updateAllElements()
-    loop = True
     
+    loop = True
+    count = 0
     while(loop):
         bot.updateWindowCoordinates()
-        if (bot.checkNotDetectedElements()):
-            print("not detected elements, updating")
-            bot.updateNotDetectedElements()
-            time.sleep(1)
+        bot.checkAndDetectElements()
         bot.manageVitals()
         bot.getBuffs()
         bot.attack()
+        bot.s_GameScreen.visualize()
+        if (count > 3):
+            break
+        count+=1
         
         

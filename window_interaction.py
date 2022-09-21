@@ -12,7 +12,13 @@ def setForegroundWindow(hwnd):
     if (current_window != hwnd):
         #shell.SendKeys('%')
         win32gui.SetForegroundWindow(hwnd)
-
+        
+def maximizeWindow(hwnd):
+        tup = win32gui.GetWindowPlacement(hwnd)
+        if tup[1] == win32con.SW_SHOWMINIMIZED:
+            win32gui.ShowWindow(hwnd, win32con.SW_MAXIMIZE)
+            time.sleep(0.2)
+    
 def revertForegroundWindow():
     if (win32gui.GetForegroundWindow() != current_window):
         #shell.SendKeys('%')

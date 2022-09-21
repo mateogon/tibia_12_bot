@@ -20,7 +20,10 @@ class BaseElement(ABC):
     def getImage(self):
         return img.screengrab_array(self.hwnd,self.region)
     def visualize(self):
-        img.screengrab_array(self.hwnd,self.region,True)
+        if (self.detected):
+            img.screengrab_array(self.hwnd,self.region,True)
+        else:
+            print("cannot visualize: not detected")
     def printRegion(self):
         print("(x: {0[0]} y: {0[1]} x2: {0[2]} y2: {0[3]})".format(self.region))
     def getWidth(self):
@@ -67,6 +70,53 @@ class BoundScreenElement(BaseElement):
         self.region = (x1+width+self.start_offsets[0], y1+self.start_offsets[1], x2+self.end_offsets[0], y2+height+self.end_offsets[1])
         self.detected = True
         return True
+class GameScreenElement(BaseElement):
+    def __init__(self, name,hwnd,search_image_start, search_image_end,search_region_start_function = lambda w,h: (0,0,0,0),search_region_end_function = lambda w,h: (0,0,0,0),start_offsets = (0,0), end_offsets = (0,0)):
+        self.search_image_start = search_image_start
+        self.search_image_end = search_image_end
+        self.search_region_start_function = search_region_start_function
+        self.search_region_end_function = search_region_end_function
+        self.start_offsets = start_offsets
+        self.end_offsets = end_offsets
+        super().__init__(name,hwnd)
+        
+    def update(self):
+        game_w,game_h = self.getGameDimensions()
+        region_start = self.search_region_start_function(game_w,game_h)
+        region_end = self.search_region_end_function(game_w,game_h)
+        found_start = img.locateImage(self.hwnd, self.search_image_start, region_start, 0.96)
+        found_end = img.locateImage(self.hwnd,self.search_image_end, region_end, 0.96)
+        if not found_start or not found_end:
+            self.detected = False
+            print("couldn't find GameScreen start or end")
+            return False
+        x1, y1, width, height = found_start
+        x1 += region_start[0]-self.LEFT
+        y1 += region_start[1]-self.TOP+54
+        x2, y2, _, _ = found_end
+        x2 += region_end[0]-self.LEFT
+        y2 += region_end[1]-self.TOP-26
+        pix = (0,0,0)
+        flag = False
+        for i in range(200, 1000):
+            pix = img.GetPixelRGBColor(self.hwnd,(x1+i,y1))
+            if (img.ColorDistance(pix,(22,22,22)) < 5):
+                x1 = x1+i          
+                break
+        for i in range(x1,x2,20):#fast scan to see where line ends
+            pix = img.GetPixelRGBColor(self.hwnd,(i,y1))
+            if (img.ColorDistance(pix,(22,22,22)) > 15):
+                x2 = i    
+                break
+        for i in range(x2,x2-30,-1):
+            pix = img.GetPixelRGBColor(self.hwnd,(i,y1))
+            if (img.ColorDistance(pix,(22,22,22)) < 5):
+                x2 = i   
+                flag = True          
+                break
+        self.region = (x1+self.start_offsets[0], y1+self.start_offsets[1], x2+self.end_offsets[0], y2+height+self.end_offsets[1])
+        self.detected = flag
+        return flag
 class ScreenElement(BaseElement):
     def __init__(self, name,hwnd,search_image,search_region_function = lambda w,h: (0,0,0,0),x_offset = 0,y_offset = 0,elem_width = 0, elem_height = 0):
         self.x_offset = x_offset
