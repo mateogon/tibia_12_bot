@@ -1,11 +1,5 @@
 # region Imports
-#import pyautogui
-from tkinter import LEFT
 import win32gui
-import win32con
-import win32api
-import win32ui
-import win32com.client
 from ctypes import windll
 import time
 import pytesseract
@@ -14,22 +8,15 @@ import numpy as np
 import PIL
 import os
 import keyboard as kb
-import re
 from pynput import keyboard
 from math import sqrt
 
 # data
 from collections import deque
 import winsound
-import scipy.stats as stats
 #from natsort import natsorted
-import difflib
-import atexit
-import array, struct
-import operator
 
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-
 
 import data
 import image as img
@@ -40,7 +27,7 @@ from client_manager import *
 # endregion
 
 class Bot():
-    
+    hp_colors = [(192,192,0),(96,192,96),(0,192,0),(192,48,48)] 
     def __init__(self):
         self.base_directory = os.getcwd()
         self.original_title,self.hwnd = attachToClient()
@@ -80,17 +67,20 @@ class Bot():
             self.hp_queue.append(100)
         #buff dict
         self.buffs = {}
-        self.heal_spell_hotkey = 'F1'
-        self.heal_potion_hotkey = 'F3'
-        self.strong_heal_hotkey = False
-        self.use_hp_pot = False
-        self.rune_heal_hotkey = False
-        self.mana_hotkey = 'F3'
-        self.mp_thresh = 30
         
+        #configs
+        
+        
+        self.mp_thresh = 30
+        self.mana_hotkey = 'F3'
         self.hp_thresh_hi = 90
         self.hp_thresh_lo = 70
+        self.heal_spell_hotkey = 'F1'
+        self.heal_potion_hotkey = 'F3'
         
+        self.attack_spell_hotkey = 'F5'
+        self.monsters_around_spell = 3
+        self.attack_spell_area = 3 # 3 -> 3x3
     
     def updateWindowCoordinates(self):
         maximizeWindow(self.hwnd)
@@ -226,8 +216,60 @@ class Bot():
             return False
         #print("pos "+str(pos) + " is NOT on cooldown")
         return True
-    def getGameRegion(self):
-        img.screengrab_array(self.hwnd,(self.left,self.top,self.width,self.height),True)
+    def getGameRegionSquares(self):
+        gr_w, gr_h = self.s_GameScreen.getWidth(),self.s_GameScreen.getHeight()
+        sqr_w = int(gr_w/15)#int(gr_w/30)#
+        sqr_h = int(gr_h/11)#int(gr_h/30)#
+        print((sqr_w,sqr_h))
+        game_region_squares = np.empty([15,11], dtype=object)
+        image = self.s_GameScreen.getImage()
+        for y in range(0,11):
+            cv2.line(image, (0,y*sqr_h), (gr_w,y*sqr_h), (255,255,255), 1)  
+            for x in range(0,15):
+                cv2.line(image, (x*sqr_w,0), (x*sqr_w,gr_h), (255,255,255), 1)
+                game_region_squares[x,y] = (x*sqr_w,y*sqr_h)
+        img.visualize(image)
+        return (game_region_squares,sqr_w,sqr_h)
+
+    def getMonstersAround(self,area):
+        # area is either 3, 4, 5 or 6 -> meaning 3x3, 4x4, 5x5 or 6x6 area around player
+        region = self.s_GameScreen.getNamesArea(area)
+        image = img.screengrab_array(self.hwnd,region)
+        #img.visualize(image)
+        #self.s_GameScreen.getImage()
+        
+        #img = screengrab_array(area_around_player)
+        #img = area_screenshot(area_around_player)
+
+        shape = image.shape
+        mask = np.full([shape[0],shape[1]],False)
+        black_image = np.full_like(image, [0, 0, 0])
+        red, green, blue = image[:,:,2], image[:,:,1], image[:,:,0]
+        for color in self.hp_colors:
+            r1, g1, b1 = color # Original value
+            r2, g2, b2 = 0, 0, 0 # Value that we want to replace it with
+            mask = (red == r1) & (green == g1) & (blue == b1)
+            black_image[mask] = [255,255,255]
+
+        kernel = np.ones((5, 5), 'uint8')
+
+        black_image = cv2.dilate(black_image, kernel, iterations=2)
+        
+        black_image = cv2.cvtColor(black_image,cv2.COLOR_BGR2GRAY)
+        
+        thresh = cv2.threshold(black_image,128,255,cv2.THRESH_BINARY)[1]
+        
+        dist_transform = cv2.distanceTransform(thresh,cv2.DIST_L2,5)
+        ret, thresh = cv2.threshold(dist_transform,0.7*dist_transform.max(),255,0)
+        thresh = np.uint8(thresh)
+        kernel = np.ones((3,3),np.uint8)
+        opening = cv2.morphologyEx(thresh,cv2.MORPH_OPEN,kernel, iterations = 2)
+        #img.visualize(opening)
+        contours,hierarchy = cv2.findContours(opening, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+     
+        #print(timeInMillis() - start)
+        return len(contours)-1
+    
     def getVitals(self):
         #returns hp % and mp % in a tuple
         hppc = 0
@@ -272,14 +314,10 @@ class Bot():
 
         burst = self.getBurstDamage()
         if hppc < self.hp_thresh_lo:
-            if self.rune_heal_hotkey and hppc < 35:
-                press(self.hwnd,self.rune_heal_hotkey)
-            else:
-                if self.heal_potion_hotkey:
-                    press(self.hwnd,self.heal_potion_hotkey)
+            if self.heal_potion_hotkey:
+                press(self.hwnd,self.heal_potion_hotkey)
         if hppc < 50 or burst > 40:
-            if self.strong_heal_hotkey:
-                self.press(self.strong_heal_hotkey)
+            pass
         if (hppc <= self.hp_thresh_hi or burst > 12):
             press(self.hwnd,self.heal_spell_hotkey)
         if (mppc <= self.mp_thresh):
@@ -335,19 +373,35 @@ implement a check for dimension change
 if __name__ == "__main__":
     
     bot = Bot()
-    
     bot.updateAllElements()
     
+    attack = True
     loop = True
     count = 0
+    
+    last_attack_time = timeInMillis()
+    norm_delay = getNormalDelay() #for randomness
+    
     while(loop):
         bot.updateWindowCoordinates()
         bot.checkAndDetectElements()
         bot.manageVitals()
         bot.getBuffs()
-        bot.attack()
-        bot.s_GameScreen.visualize()
-        if (count > 3):
+        if attack:
+            cur_sleep = timeInMillis() - last_attack_time
+            if (timeInMillis() - cur_sleep > (100+norm_delay)):
+                monsters_around = bot.getMonstersAround(bot.monsters_around_spell)
+                print(monsters_around)
+                if monsters_around >= bot.monsters_around_spell:
+                    print("using spell")
+                    press(bot.hwnd,bot.attack_spell_hotkey)
+            norm_delay = getNormalDelay()   
+            last_attack_time = timeInMillis()
+            bot.attack()
+        #bot.getGameRegionSquares()
+        #print(bot.getMonstersAround(bot.monsters_around_spell))
+        
+        if (count < 0):
             break
         count+=1
         
