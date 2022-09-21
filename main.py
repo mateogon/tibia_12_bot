@@ -68,9 +68,14 @@ class Bot():
         #buff dict
         self.buffs = {}
         
+        
+        
+        #boolean to alternate between 2 spells
+        self.spell_alternate = False
+        self.last_attack_time = timeInMillis()
+        self.normal_delay = getNormalDelay() #for randomness
+        
         #configs
-        
-        
         self.mp_thresh = 30
         self.mana_hotkey = 'F3'
         self.hp_thresh_hi = 90
@@ -78,9 +83,11 @@ class Bot():
         self.heal_spell_hotkey = 'F1'
         self.heal_potion_hotkey = 'F3'
         
-        self.attack_spell_hotkey = 'F5'
-        self.monsters_around_spell = 3
-        self.attack_spell_area = 3 # 3 -> 3x3
+        self.areaspell1_hotkey = 'F5'
+        self.areaspell_area = 3 # 3 -> 3x3
+        self.areaspell2_hotkey = 'F6'
+        self.min_monsters_around_spell = 3
+        
     
     def updateWindowCoordinates(self):
         maximizeWindow(self.hwnd)
@@ -251,7 +258,7 @@ class Bot():
             mask = (red == r1) & (green == g1) & (blue == b1)
             black_image[mask] = [255,255,255]
 
-        kernel = np.ones((5, 5), 'uint8')
+        kernel = np.ones((3, 3), 'uint8')
 
         black_image = cv2.dilate(black_image, kernel, iterations=2)
         
@@ -263,7 +270,7 @@ class Bot():
         ret, thresh = cv2.threshold(dist_transform,0.7*dist_transform.max(),255,0)
         thresh = np.uint8(thresh)
         kernel = np.ones((3,3),np.uint8)
-        opening = cv2.morphologyEx(thresh,cv2.MORPH_OPEN,kernel, iterations = 2)
+        opening = cv2.morphologyEx(thresh,cv2.MORPH_OPEN,kernel, iterations = 1)
         #img.visualize(opening)
         contours,hierarchy = cv2.findContours(opening, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
      
@@ -363,12 +370,27 @@ class Bot():
                         click(self.hwnd,x, y)
                         time.sleep(0.001)
                         return
-'''TODO
-Update search regions on window dimension change
-implement a check for dimension change
+                    
+    def updateLastAttackTime(self):
+        self.last_attack_time = timeInMillis()
+    def newNormalDelay(self):
+        self.normal_delay = getNormalDelay()    
 
-'''
+    def attackSpells(self):
+        cur_sleep = timeInMillis() - self.last_attack_time
+        if (timeInMillis() - cur_sleep > (100+self.normal_delay)):
             
+            monsters_around = bot.getMonstersAround(self.areaspell_area)
+            if monsters_around >= self.min_monsters_around_spell:
+                
+                if self.spell_alternate:
+                    press(self.hwnd,self.areaspell1_hotkey)
+                else:
+                    press(self.hwnd,self.areaspell2_hotkey)
+                    
+                self.spell_alternate = not self.spell_alternate
+                self.updateLastAttackTime()
+                self.newNormalDelay()  
             
 if __name__ == "__main__":
     
@@ -376,31 +398,22 @@ if __name__ == "__main__":
     bot.updateAllElements()
     
     attack = True
+    heal = True
     loop = True
     count = 0
-    
-    last_attack_time = timeInMillis()
-    norm_delay = getNormalDelay() #for randomness
     
     while(loop):
         bot.updateWindowCoordinates()
         bot.checkAndDetectElements()
-        bot.manageVitals()
         bot.getBuffs()
-        if attack:
-            cur_sleep = timeInMillis() - last_attack_time
-            if (timeInMillis() - cur_sleep > (100+norm_delay)):
-                monsters_around = bot.getMonstersAround(bot.monsters_around_spell)
-                print(monsters_around)
-                if monsters_around >= bot.monsters_around_spell:
-                    print("using spell")
-                    press(bot.hwnd,bot.attack_spell_hotkey)
-            norm_delay = getNormalDelay()   
-            last_attack_time = timeInMillis()
-            bot.attack()
-        #bot.getGameRegionSquares()
-        #print(bot.getMonstersAround(bot.monsters_around_spell))
         
+        if heal:
+            bot.manageVitals()
+        
+        if attack:
+            bot.attack()
+            bot.attackSpells()
+            
         if (count < 0):
             break
         count+=1
