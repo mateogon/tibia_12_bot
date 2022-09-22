@@ -4,6 +4,8 @@
 
 Fast and light weight bot that allows controlling the game while the process is on the background.
 
+Only OTservers supported.
+
 # Features Status
 
 - ActionBar:
@@ -35,3 +37,7 @@ Fast and light weight bot that allows controlling the game while the process is 
   
 - Party:
   - Multiboxing: setting leader and follower accounts that auto follow the leader :warning:
+  
+- GUI:
+  - GUI to choose what client to attach to :heavy_check_mark:
+  - GUI to modify settings and hotkeys :warning:

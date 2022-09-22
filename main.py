@@ -10,7 +10,7 @@ import os
 import keyboard as kb
 from pynput import keyboard
 from math import sqrt
-
+import tkinter
 # data
 from collections import deque
 import winsound
@@ -24,13 +24,14 @@ from screen_elements import *
 from window_interaction import *
 from extras import *
 from client_manager import *
+from gui import choose_capture_window
 # endregion
 
 class Bot():
     hp_colors = [(192,192,0),(96,192,96),(0,192,0),(192,48,48)] 
     def __init__(self):
         self.base_directory = os.getcwd()
-        self.original_title,self.hwnd = attachToClient()
+        self.hwnd = choose_capture_window()
         
         self.left, self.top, self.right, self.bottom = win32gui.GetWindowRect(self.hwnd)
         self.height = abs(self.bottom - self.top)
@@ -254,7 +255,6 @@ class Bot():
         red, green, blue = image[:,:,2], image[:,:,1], image[:,:,0]
         for color in self.hp_colors:
             r1, g1, b1 = color # Original value
-            r2, g2, b2 = 0, 0, 0 # Value that we want to replace it with
             mask = (red == r1) & (green == g1) & (blue == b1)
             black_image[mask] = [255,255,255]
 

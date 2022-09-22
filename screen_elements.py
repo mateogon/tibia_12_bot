@@ -11,6 +11,7 @@ class BaseElement(ABC):
     detected = False
     LEFT = -8
     TOP = -8
+    folder = "hud/"
     def __init__(self, name,hwnd,search_image='',search_region_function = lambda w,h: (0,0,0,0)):
         self.name = name
         self.hwnd = hwnd
@@ -55,8 +56,8 @@ class BoundScreenElement(BaseElement):
         game_w,game_h = self.getGameDimensions()
         region_start = self.search_region_start_function(game_w,game_h)
         region_end = self.search_region_end_function(game_w,game_h)
-        found_start = img.locateImage(self.hwnd, self.search_image_start, region_start, 0.96)
-        found_end = img.locateImage(self.hwnd,self.search_image_end, region_end, 0.96)
+        found_start = img.locateImage(self.hwnd, self.folder+self.search_image_start, region_start, 0.96)
+        found_end = img.locateImage(self.hwnd,self.folder+self.search_image_end, region_end, 0.96)
         if not found_start or not found_end:
             self.detected = False
             print("couldn't find BoundScreenElement "+ self.name+ " start or end")
@@ -90,8 +91,8 @@ class GameScreenElement(BaseElement):
         game_w,game_h = self.getGameDimensions()
         region_start = self.search_region_start_function(game_w,game_h)
         region_end = self.search_region_end_function(game_w,game_h)
-        found_start = img.locateImage(self.hwnd, self.search_image_start, region_start, 0.96)
-        found_end = img.locateImage(self.hwnd,self.search_image_end, region_end, 0.96)
+        found_start = img.locateImage(self.hwnd, self.folder+self.search_image_start, region_start, 0.96)
+        found_end = img.locateImage(self.hwnd,self.folder+self.search_image_end, region_end, 0.96)
         if not found_start or not found_end:
             self.detected = False
             print("couldn't find GameScreen start or end")
@@ -156,7 +157,7 @@ class ScreenElement(BaseElement):
         
     def update(self):
         self.updateSearchRegion()
-        found = img.locateImage(self.hwnd, self.search_image, self.search_region, 0.96)
+        found = img.locateImage(self.hwnd, self.folder+self.search_image, self.search_region, 0.96)
         if found:
             x2, y2, img_w , img_h = found
             if (self.elem_width == 0):
@@ -183,12 +184,12 @@ class ScreenWindow(ScreenElement):
     def update(self):
         game_w,game_h = self.getGameDimensions()
         region = self.right_region_function(game_w,game_h)
-        window_top = img.locateImage(self.hwnd, self.search_image, region, 0.96)
-        window_bottom = img.locateManyImage(self.hwnd,'battle_list_end.png', region, 0.94)
+        window_top = img.locateImage(self.hwnd, self.folder+self.search_image, region, 0.96)
+        window_bottom = img.locateManyImage(self.hwnd,self.folder+'battle_list_end.png', region, 0.94)
         if not window_top:
             region = self.left_region_function(game_w,game_h)
-            window_top = img.locateImage(self.hwnd, self.search_image, region, 0.96)
-            window_bottom = img.locateManyImage(self.hwnd,'battle_list_end.png', region, 0.94)
+            window_top = img.locateImage(self.hwnd, self.folder+self.search_image, region, 0.96)
+            window_bottom = img.locateManyImage(self.hwnd,self.folder+'battle_list_end.png', region, 0.94)
         if not window_top:
             print("couldn't find {} on screen".format(self.name))
             self.detected = False

@@ -205,3 +205,6 @@ def lookForColors(hwnd,colors, region, dx=3, dy=3,absolute = False):
                     positions.append((x-begin_x,y-begin_y))
 
     return positions
+
+def rgb(rgb):  # Function to translate color to RGB
+    return "#%02x%02x%02x" % rgb
