@@ -71,12 +71,14 @@ class Bot:
         
         # endregion
         
-        #
+        #GUI variables
         self.loop = True
         self.attack = True
         self.attack_spells = True
         self.hp_heal = True
         self.mp_heal = True
+        self.waypoint_folder = ""
+        
         #hp history for burst damage
         self.hp_queue = deque([], maxlen=3)
         for i in range(0, 3):
@@ -93,8 +95,8 @@ class Bot:
         #configs
         self.mp_thresh = 30
         self.mana_hotkey = 'F3'
-        self.hp_thresh_hi = 90
-        self.hp_thresh_lo = 70
+        self.hp_thresh_high = 90
+        self.hp_thresh_low = 70
         self.heal_spell_hotkey = 'F1'
         self.heal_potion_hotkey = 'F3'
         
@@ -335,16 +337,16 @@ class Bot:
         self.hp_queue.appendleft(hppc)
 
         burst = self.getBurstDamage()
-        if hppc < self.hp_thresh_lo:
+        if hppc < self.hp_thresh_low.get():
             if self.heal_potion_hotkey:
                 press(self.hwnd,self.heal_potion_hotkey)
         if hppc < 50 or burst > 40:
             pass
-        if (hppc <= self.hp_thresh_hi or burst > 12):
+        if (hppc <= self.hp_thresh_high.get() or burst > 12):
             press(self.hwnd,self.heal_spell_hotkey)
     def manageMana(self):
         mppc = self.getMana()
-        if (mppc <= self.mp_thresh):
+        if (mppc <= self.mp_thresh.get()):
             press(self.hwnd,self.mana_hotkey)
             
     def isAttacking(self):
@@ -421,7 +423,7 @@ if __name__ == "__main__":
         bot.updateWindowCoordinates()
         bot.checkAndDetectElements()
         bot.getBuffs()
-        
+        #print(bot.waypoint_folder.get())
         if bot.hp_heal.get():
             bot.manageHealth()
             
