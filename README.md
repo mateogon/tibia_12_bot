@@ -11,10 +11,10 @@ Only OTservers supported.
   For the health and mana to be detected, you need to enable the "Show status bar" in Options > HUD.
   
   Drag the health under the equipment, like this:
-  - ![Alt text](https://github.com/mateogon/tibia_12_bot/tree/main/img/imagesReadme/right_pane.png)
+  - ![Screenshot](https://github.com/mateogon/tibia_12_bot/tree/main/img/imagesReadme/right_pane.png)
 
   The left pane should be expanded once:
-  - ![Alt text](https://github.com/mateogon/tibia_12_bot/tree/main/img/imagesReadme/left_pane.png)
+  - ![Screenshot](https://github.com/mateogon/tibia_12_bot/tree/main/img/imagesReadme/left_pane.png)
 
   Should only have one action bar.
 
