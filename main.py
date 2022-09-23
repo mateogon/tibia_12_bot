@@ -10,7 +10,7 @@ import os
 import keyboard as kb
 from pynput import keyboard
 from math import sqrt
-import tkinter
+from tkinter import BooleanVar
 # data
 from collections import deque
 import winsound
@@ -18,26 +18,33 @@ import winsound
 
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
+#LOCAL
 import data
 import image as img
 from screen_elements import *
 from window_interaction import *
 from extras import *
 from client_manager import *
-from gui import choose_capture_window
+from choose_client_gui import choose_capture_window
+from main_GUI import *
 # endregion
 
-class Bot():
+class Bot:
     hp_colors = [(192,192,0),(96,192,96),(0,192,0),(192,48,48)] 
     def __init__(self):
         self.base_directory = os.getcwd()
         self.hwnd = choose_capture_window()
+        self.character_name = self.getCharacterName()
+        if (self.character_name == None):
+            print("You are not logged in.")
+            exit()
+            
         
         self.left, self.top, self.right, self.bottom = win32gui.GetWindowRect(self.hwnd)
         self.height = abs(self.bottom - self.top)
         self.width = abs(self.right - self.left)
-        self.actionbar_moved = {'color': False}
         
+        # region Scren Elements Init
         self.s_Stop = ScreenElement("Stop",self.hwnd,'stop.png',lambda w,h: (w - 200, 0 , w, int(h/2)))
         
         self.s_ActionBar = BoundScreenElement("ActionBar",self.hwnd,'action_bar_start.png','action_bar_end.png',lambda w,h: (0, int(h/4), int(w/3), h),lambda w,h: (int(2*w/3), int(h/4), w, h),(2,0))
@@ -62,6 +69,14 @@ class Bot():
         #element order is important
         self.ElementsLists = [self.ScreenElements,self.BoundScreenElements,self.RelativeScreenElements,self.ScreenWindows,]
         
+        # endregion
+        
+        #
+        self.loop = True
+        self.attack = True
+        self.attack_spells = True
+        self.hp_heal = True
+        self.mp_heal = True
         #hp history for burst damage
         self.hp_queue = deque([], maxlen=3)
         for i in range(0, 3):
@@ -69,8 +84,7 @@ class Bot():
         #buff dict
         self.buffs = {}
         
-        
-        
+
         #boolean to alternate between 2 spells
         self.spell_alternate = False
         self.last_attack_time = timeInMillis()
@@ -89,6 +103,11 @@ class Bot():
         self.areaspell2_hotkey = 'F6'
         self.min_monsters_around_spell = 3
         
+        #GUI
+        self.GUI = root(self,self.character_name)
+        
+        
+        
     
     def updateWindowCoordinates(self):
         maximizeWindow(self.hwnd)
@@ -103,12 +122,14 @@ class Bot():
             if self.checkActionbarMoved():
                 print("actionbar moved")
                 self.updateBoundElements()
-    
+    def getCharacterName(self):
+        title = win32gui.GetWindowText(self.hwnd)
+        return title.split(" - ")[1]
     def checkAndDetectElements(self):
         if (bot.checkAnyUndetectedElements()):
             print("elements not detected, updating")
             bot.updateNotDetectedElements()
-            time.sleep(1)
+            
     def checkAnyUndetectedElements(self):
         for elem_type in self.ElementsLists:
             for elem in elem_type:
@@ -116,6 +137,7 @@ class Bot():
                     return True
         return False
     def updateAllElements(self):
+        print("Updating all elements")
         for elem_type in self.ElementsLists:
             for elem in elem_type:
                 if elem_type == self.ScreenElements:
@@ -175,16 +197,6 @@ class Bot():
                 print(pixel_color)
                 return True
         return False
-        '''
-        if type(self.actionbar_moved['color']) is bool:
-            #not yet initialized
-            self.actionbar_moved['color'] = img.GetPixelRGBColor(self.hwnd, (x,y))
-            return False
-        else:
-            pixel_color = img.GetPixelRGBColor(self.hwnd, (x,y))
-            if self.actionbar_moved['color'] != pixel_color:
-                return True
-        '''
         
     def clickWindowButton(self,pos):
         '''pos: starts from 1'''
@@ -276,11 +288,8 @@ class Bot():
      
         #print(timeInMillis() - start)
         return len(contours)-1
-    
-    def getVitals(self):
-        #returns hp % and mp % in a tuple
+    def getHealth(self):
         hppc = 0
-        mppc = 0
         cant = 0
         region = self.s_Health.region
         
@@ -295,9 +304,15 @@ class Bot():
                 cant += 1
         cant *= delta
         hppc = 100 * (bar_width-cant)/bar_width
-        
+        return hppc
+    def getMana(self):
+        mppc = 0
+        cant = 0
+        region = self.s_Health.region
         region = self.s_Mana.region
         y = region[1]+6
+        bar_width = self.s_Mana.getWidth()
+        delta = 4
         cant = 0
         #counts gray pixels in a line of mp region
         for x in range(region[0], region[2], delta):
@@ -307,15 +322,15 @@ class Bot():
                 cant += 1
         cant *= delta
         mppc = 100 * (bar_width-cant)/bar_width
-        return (hppc, mppc)
+        return mppc
     def getBurstDamage(self):
         current = self.hp_queue[0]
         val = []
         for i in range(0, 3):
             val.append(self.hp_queue[i]-current)
         return max(val)
-    def manageVitals(self):
-        hppc, mppc = self.getVitals()
+    def manageHealth(self):
+        hppc = self.getHealth()
         self.hp_queue.pop()
         self.hp_queue.appendleft(hppc)
 
@@ -327,8 +342,11 @@ class Bot():
             pass
         if (hppc <= self.hp_thresh_hi or burst > 12):
             press(self.hwnd,self.heal_spell_hotkey)
+    def manageMana(self):
+        mppc = self.getMana()
         if (mppc <= self.mp_thresh):
             press(self.hwnd,self.mana_hotkey)
+            
     def isAttacking(self):
         b_x, b_y,_,b_y2 = self.s_BattleList.region
         #w, h = self.s_BattleList.getWidth(),self.s_BattleList.getHeight()
@@ -356,7 +374,7 @@ class Bot():
         os.chdir(self.base_directory)
         self.buffs = img.imageListExist(self.hwnd,lista, 'buffs', area, 0.95)
 
-    def attack(self):
+    def clickAttack(self):
         _x, _y, _x2,_y2 = self.s_BattleList.region
         # x 3 y 22
         #found = lookForColor([(255,0,0),(255,128,128)],(x,y,w-150,h))
@@ -397,25 +415,28 @@ if __name__ == "__main__":
     bot = Bot()
     bot.updateAllElements()
     
-    attack = True
-    heal = True
-    loop = True
     count = 0
-    
-    while(loop):
+    while(bot.loop.get()): 
+        bot.GUI.loop()
         bot.updateWindowCoordinates()
         bot.checkAndDetectElements()
         bot.getBuffs()
         
-        if heal:
-            bot.manageVitals()
-        
-        if attack:
-            bot.attack()
+        if bot.hp_heal.get():
+            bot.manageHealth()
+            
+        if bot.mp_heal.get():
+            bot.manageMana()
+            
+        if bot.attack.get():
+            bot.clickAttack()
+            
+        if bot.attack_spells.get():
             bot.attackSpells()
             
         if (count < 0):
             break
         count+=1
+        
         
         
