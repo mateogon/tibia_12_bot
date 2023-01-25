@@ -32,6 +32,10 @@ class BaseElement(ABC):
         return abs(self.region[2]-self.region[0])
     def getHeight(self):
         return abs(self.region[3]-self.region[1])
+    def getCenter(self):
+        return (self.region[0]+int(self.getWidth()/2),self.region[1]+int(self.getHeight()/2))
+    def getRelativeCenter(self):
+        return (int(self.getWidth()/2),int(self.getHeight()/2))
     def getGameDimensions(self):
         left, top, right, bottom = win32gui.GetWindowRect(self.hwnd)
         game_h = abs(bottom - top)
@@ -84,7 +88,8 @@ class GameScreenElement(BaseElement):
         self.search_region_end_function = search_region_end_function
         self.start_offsets = start_offsets
         self.end_offsets = end_offsets
-        self.areas = {3: False, 4:False,5:False,6:False} # 3x3, 4x4, 5x5, 6x6 tile areas around center tile(player)
+        self.areas = {3: False, 4:False,5:False,6:False,7:False,8:False,9:False} # 3x3, 4x4, 5x5, 6x6 tile areas around center tile(player)
+        self.tiles_around_player = []
         super().__init__(name,hwnd)
         
     def update(self):
@@ -126,27 +131,41 @@ class GameScreenElement(BaseElement):
         self.tile_w = self.getWidth()/self.tiles_x
         self.detected = flag
         self.updateAreas()
+        self.updateTilesAroundPlayer()
         return flag
     def updateAreas(self):
         center_tile = (7,5)
-        for i in range(1,5):
-            x,y = center_tile
-            start = (x-i,y-i) #top left
-            end = (x+i+1,y+i+1) #bottom right
-            r = (start[0]*self.tile_w ,start[1]*self.tile_h, end[0]*self.tile_w ,end[1]*self.tile_h)
-            r = (int(self.region[0]+r[0]) ,int(self.region[1]+ r[1]) ,int(self.region[0]+ r[2]),int(self.region[1]+r[3]))
-            self.areas[i+2]=r
+        for i in range(1,8):
+            if i != 7:
+                x,y = center_tile
+                start = (x-i,y-i) #top left
+                end = (x+i+1,y+i+1) #bottom right
+                r = (start[0]*self.tile_w ,start[1]*self.tile_h, end[0]*self.tile_w ,end[1]*self.tile_h)
+                r = (int(self.region[0]+r[0]) ,int(self.region[1]+ r[1]) ,int(self.region[0]+ r[2]),int(self.region[1]+r[3]))
+                self.areas[i+2]=r
+            else:
+                self.areas[i+2] = self.region
             #image = img.screengrab_array(self.hwnd,r,True)
+    def updateTilesAroundPlayer(self):
+        region = self.getAreaAroundPlayer(3)
+        tile_h = self.tile_h
+        tile_w = self.tile_w
+        self.tiles_around_player = []
+        for x in range(0,3):
+            self.tiles_around_player.append([])
+            for y in range(0,3):
+                self.tiles_around_player[x].append((region[0]+int(x*tile_w+int(tile_w/2)),region[1]+int(y*tile_h+int(tile_h/2))))
     def getNamesArea(self,area):
         r = self.areas[area]
-        offset = int(self.tile_h/2) #offset because names are offset from tile
-        r = (r[0],r[1]-offset,r[2],r[3]-offset)
+        offset_x = int(self.tile_h/3) #offset because names are offset from tile
+        offset_y = offset_x*2
+        r = (r[0],r[1]-offset_x,r[2],r[3]-offset_y)
         return r
     def getTileDimensions(self):
         return (self.tile_w, self.tile_h)
-    def getAreaAroundPlayer(self):
+    def getAreaAroundPlayer(self,area):
         
-        return False
+        return self.areas[area]
 class ScreenElement(BaseElement):
     def __init__(self, name,hwnd,search_image,search_region_function = lambda w,h: (0,0,0,0),x_offset = 0,y_offset = 0,elem_width = 0, elem_height = 0):
         self.x_offset = x_offset
@@ -219,10 +238,17 @@ class RelativeScreenElement(BaseElement):
     def __init__(self,name,hwnd,element,offsets):
         self.element = element
         self.offsets = offsets
+        self.center = False
         super().__init__(name,hwnd)
         
     def update(self):
         self.region = tuple(map(operator.add, self.element.region, self.offsets))
         self.detected = self.element.detected
+        self.center = self.getCenter()
         return self.detected
+    #to test different offsets
+    def add_offset(self,mod_offsets):
+        self.offsets = tuple(map(operator.add, self.offsets, mod_offsets))
+        self.update()
+        
         

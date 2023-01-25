@@ -3,12 +3,26 @@ import tkinter as tk
 from tkinter import SUNKEN, RAISED, ttk
 from PIL import Image, ImageTk
 from image import rgb
+import win32gui
+bots = 0
+client_selector_count = 0
+
+def botEnumHandler(hwnd, lParam):
+    try:
+        title = win32gui.GetWindowText(hwnd)
+        if win32gui.GetClassName(hwnd) == "TkTopLevel" and "Choose window" not in title:
+            global bots
+            bots+=1
+    except:
+        pass
+
 
 
 class GUI:
     def __init__(self, windowID, name):
         self.windowID = windowID
         self.name = name
+        win32gui.EnumWindows(botEnumHandler, None)
 
     def MainWindow(self, BackgroundImage, sizes, positions):
         self.windowID = tk.Tk()
@@ -16,7 +30,7 @@ class GUI:
         h = sizes[1]
         sw = self.windowID.winfo_screenwidth()
         sh = self.windowID.winfo_screenheight()
-        x = (sw - w) / positions[0]
+        x = int(w/2)+(w+10)*bots#(sw - w) / positions[0]
         y = (sh - h) / positions[1]
         self.windowID.geometry('%dx%d+%d+%d' % (w, h, x, y))
         self.windowID.title(self.name)
@@ -240,7 +254,8 @@ class GUI:
 
     def deiconify(self):
         return self.windowID.deiconify()
-
+    def bind(self,a,b):
+        self.windowID.bind(a,b)
     @staticmethod
     def openImage(image, size):
         ImageID = Image.open(image)

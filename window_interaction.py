@@ -35,9 +35,15 @@ def rclick(hwnd,x, y, x_offset=-8, y_offset=-8):
     win32gui.PostMessage(hwnd, win32con.WM_RBUTTONDOWN,
                          win32con.MK_RBUTTON, lParam)
     win32gui.PostMessage(hwnd, win32con.WM_RBUTTONUP, None, lParam)
+    
+def shiftrclick(hwnd,x, y, x_offset=-8, y_offset=-8):
+        win32api.SendMessage(hwnd, win32con.WM_KEYDOWN, 0x10, 0)
+        time.sleep(.05)
+        rclick(hwnd,x, y , x_offset, y_offset)
+        win32api.SendMessage(hwnd, win32con.WM_KEYUP, 0x10, 0)
 
 def press(hwnd,*args):
     for i in args:
         win32api.SendMessage(hwnd, win32con.WM_KEYDOWN, data.VK_CODE[i], 0)
-        time.sleep(.05)
+        #time.sleep(.05)
         win32api.SendMessage(hwnd, win32con.WM_KEYUP, data.VK_CODE[i], 0)
