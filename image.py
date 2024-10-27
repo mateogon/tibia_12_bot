@@ -20,6 +20,7 @@ def tesser_image(im, a, b, c, config):
               cv2.THRESH_TRUNC, cv2.THRESH_TOZERO, cv2.THRESH_TOZERO_INV]
     retval, img = cv2.threshold(im, a, b, thresh[c])
     img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
     text = pytesseract.image_to_string(img, config=config)
     return text.strip()
     #
@@ -35,6 +36,7 @@ def visualize(img):
     cv2.imshow('im', img)
     if (cv2.waitKey(0) & 0xFF):
         cv2.destroyAllWindows()
+        
 def visualize_fast(img):
     cv2.imshow('im', img)
     
@@ -107,29 +109,37 @@ def listColors(file):
     template.close()
     
 
-def locateImage(hwnd,file, region, thresh, show=False):
-    img_rgb = screengrab_array(hwnd,region)
-    if isinstance(file,str):
-        template = cv2.imread('img/'+file)
+def locateImage(hwnd, file, region, thresh, show=False):
+    img_rgb = screengrab_array(hwnd, region)
+    
+    if isinstance(file, str):
+        template = cv2.imread('img/' + file)
     else:
         template = file
+
     height, width, channels = template.shape
     h, w = template.shape[:-1]
     res = cv2.matchTemplate(img_rgb, template, cv2.TM_CCOEFF_NORMED)
     threshold = thresh
     loc = np.where(res >= threshold)
-    for pt in zip(*loc[::-1]):  # Switch collumns and rows
-        if (show):
-            cv2.rectangle(img_rgb, pt, (pt[0] + w, pt[1] + h), (255, 0, 0), 1)
-        pos = pt
-    try:
-        # print(time.time()-start_time)
-        #img = PIL.Image.fromarray(img_rgb).show()
-        if (show):
-            visualize(img_rgb)
-        return (pos[0]+left, pos[1]+top, w, h)
+    pos = None  # Initialize pos in case loc is empty
 
-    except:
+    for pt in zip(*loc[::-1]):  # Switch columns and rows
+        pos = pt
+        if show:
+            # Ensure img_rgb is in the correct format
+            img_rgb = cv2.cvtColor( img_rgb, cv2.COLOR_BGR2GRAY)
+            cv2.rectangle(img_rgb, pt, (pt[0] + w, pt[1] + h), (255, 0, 0), 1)
+
+    try:
+        if show and pos is not None:
+            visualize(img_rgb)
+        if pos is not None:
+            return (pos[0] + left, pos[1] + top, w, h)
+        else:
+            return False
+    except Exception as e:
+        print(f"An error occurred: {e}")
         return False
 
 def locateManyImage(hwnd,file, region, thresh):

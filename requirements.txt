@@ -1,0 +1,10 @@
+imutils==0.5.4
+keyboard==0.13.5
+numpy==2.1.2
+Pillow==11.0.0
+pyautogui==0.9.54
+pynput==1.7.7
+pyrsistent==0.20.0
+pytesseract==0.3.13
+pywin32==306
+scipy==1.14.1

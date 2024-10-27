@@ -328,12 +328,14 @@ class Bot:
             #print(img.GetPixelRGBColor(self.hwnd, (x,y)))
             #img.lookForColor(self.hwnd, (117,117,117) ,(x-5,y-5,x+5,y+5), 1, 1,True)
             pixel_color = img.GetPixelRGBColor(self.hwnd, (x,y))
-            if pixel_color != (114, 115, 115):#(117,117,117):
+            
+            if pixel_color !=  (114, 115, 115):#(117,117,117):
                 print(pixel_color)
                 return True
         return False
     def updateChatStatusButtonRegion(self):
-        region = (self.width-300, self.height-30, self.width-100, self.height)
+        #region = (self.width-300, self.height-30, self.width-100, self.height)
+        region = (self.width-500, self.height-300, self.width, self.height)
         button = img.locateImage(self.hwnd,'hud/chat_enabled_button.png', region, 0.96)
         if (button):
             x, y, b_w, b_h = button
@@ -592,7 +594,6 @@ class Bot:
 
 
         #return (timeInMillis()-start,contours_count)
-        print("contours found: "+str(contour_count))
         return contour_list
     @timeit
     def getMonstersAroundContoursOld(self, area, test=False, test2=False):
@@ -937,7 +938,7 @@ class Bot:
             curY = int(M["m01"] / M["m00"]) + offset_y
             party_positions.append(((curX,curY), is_leader))  
         self.party_positions = party_positions
-    @timeit
+    #@timeit
     def updateMonsterPositions(self,test = False):
         #self.monster_positions
         
@@ -983,7 +984,7 @@ class Bot:
         self.monster_positions = monster_positions
         if test:
             img.visualize_fast(opening)
-    @timeit
+    #@timeit
     def updateMonsterPositionsNew(self, test=False):
         contour_list = self.getMonstersAroundContours(9, False, False)
 
@@ -991,20 +992,27 @@ class Bot:
             opening = img.screengrab_array(self.hwnd, self.s_GameScreen.region)
 
         monster_positions = []
-        offset_x = int(self.s_GameScreen.tile_h / 4)  # offset because names are offset from tile
-        offset_y = 2 * offset_x  # int(self.s_GameScreen.tile_h/4)#2*offset_x
+        offset_x = int(self.s_GameScreen.tile_h / 4)  # Offset because names are offset from tile
+        offset_y = 2 * offset_x
         ratio = self.monster_around_scale_ratio
+        
         for contours in contour_list:
             cnts = imutils.grab_contours(contours)
             for cur in cnts:
-                # Use Numpy's built-in functions for calculating moments and center
-                moments = moment(cur)
-                center_x, center_y = np.center(moments)
-                curX = (int(center_x) * ratio) + offset_x
-                curY = (int(center_y) * ratio) + offset_y
-                monster_positions.append((curX, curY))
-        return monster_positions
+                # Calculate moments
+                moments = cv2.moments(cur)
+                # Ensure moments['m00'] is not zero to avoid division by zero
+                if moments['m00'] != 0:
+                    center_x = int(moments['m10'] / moments['m00'])
+                    center_y = int(moments['m01'] / moments['m00'])
+                    curX = (center_x * ratio) + offset_x
+                    curY = (center_y * ratio) + offset_y
+                    monster_positions.append((curX, curY))
+                else:
+                    # If area (m00) is zero, set center to (0, 0) or handle as needed
+                    monster_positions.append((0, 0))  # Optional: handle differently
 
+        return monster_positions
     def useAreaRune(self,test = False):
         if not test and (self.buffs['pz'] or self.monsterCount() <= 1):
             return
@@ -1538,33 +1546,40 @@ class Bot:
             trade_bar = img.locateImage(self.hwnd,'/hud/npc_trade.png', region, 0.96)
 
         if not(trade_bar):
+            print("no trade bar found")
             return False
         else:
+            print("trade bar found")
             x, y, box_w, box_h = trade_bar
             region = (region[0], region[1]+y, region[2], region[3])
 
-            ok_button = img.locateImage(self.hwnd,'/hud/npc_trade_ok.png', region, 0.96)
+            ok_button = img.locateImage(self.hwnd,'/hud/npc_trade_ok.png', region, 0.96, True)
+            print("ok_button",ok_button)
             x_ok, y_ok, ok_w, ok_h = ok_button
-            buy_pressed = img.locateImage(self.hwnd,'/hud/npc_trade_buy_pressed.png', region, 0.97)
-            if buy_pressed:
-                x_buy, y_buy, w_buy, h_buy = buy_pressed
-                print("clicking sell button")
-                click(self.hwnd,region[0]+x_buy + int(w_buy/2),
-                    region[1]+y_buy+int(3*h_buy/2))
-            else:
-                buy_unpressed = img.locateImage(self.hwnd,'/hud/npc_trade_buy_unpressed.png', region, 0.97)
-                x_buy, y_buy, w_buy, h_buy = buy_unpressed
+            time.sleep(0.1)
+            sell_x_off, sell_y_off = 149, 43
+            click(self.hwnd,region[0]+sell_x_off,region[1]+sell_y_off)
+            #buy_pressed = img.locateImage(self.hwnd,'/hud/npc_trade_buy_pressed.png', region, 0.97)
+            #if buy_pressed:
+            #    x_buy, y_buy, w_buy, h_buy = buy_pressed
+            #    print("clicking sell button")
+            #    click(self.hwnd,region[0]+x_buy + int(w_buy/2),
+            #        region[1]+y_buy+int(3*h_buy/2))
+            #else:
+            #    buy_unpressed = img.locateImage(self.hwnd,'/hud/npc_trade_buy_unpressed.png', region, 0.83, True)
+            #    x_buy, y_buy, w_buy, h_buy = buy_unpressed
             time.sleep(0.1)
             counter = 0
             while (True):
-                click(self.hwnd,region[0]+x_buy + int(w_buy/2), region[1]+y_buy+4*h_buy)
+                click(self.hwnd,region[0]+100 , region[1]+75)
                 time.sleep(0.05)
-                current_item_region = region[0]+x+w_buy+11, region[1]+11 + y_buy*4, region[0]+x_buy+30, region[1]+y_buy+int(h_buy*5.2)
+                current_item_region = region[0]+x+45, region[1]+64, region[0]+159, region[1]+90
                 #img.screengrab_array(self.hwnd,current_item_region,True)
                 # = locateImage('npc_trade_can_sell.png', region, 0.97)
                 #image = img.screengrab_array(self.hwnd,current_item_region)
                 #img.visualize_fast(image)
                 can_sell = img.lookForColor(self.hwnd, (192, 192, 192), current_item_region, 2, 2)
+                print("can sell: "+str(can_sell))
                 if (can_sell):
                     click(self.hwnd,region[0]+x_ok + int(ok_w/2), region[1]+y_ok+int(ok_h/2))
                     time.sleep(0.05)
@@ -1577,6 +1592,7 @@ class Bot:
         return True
     
     def getChatStatus(self):
+        print("chat_status_region",self.chat_status_region)
         enabled = img.locateImage(self.hwnd, 'hud/chat_on.png', self.chat_status_region, 0.96)
         if (enabled):
             return True
