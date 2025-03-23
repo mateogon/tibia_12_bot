@@ -202,7 +202,7 @@ class Bot:
         for i in range(0,30):
             self.slot_status.append(False)
         #cavebot
-        self.manual_loot = True
+        self.manual_loot = False
         self.lure = False
         self.last_walk_time = timeInMillis()
         self.last_lure_click_time = timeInMillis()
@@ -230,8 +230,10 @@ class Bot:
         for mark in self.mark_list:
             self.previous_marks[mark] = False
         self.chat_status_region = False
+        self.current_map_image = None
         #GUI
-        self.GUI = root(self,self.character_name,self.vocation)
+        self.GUI = ModernBotGUI(self, self.character_name, self.vocation)
+
         
     def updateWindowCoordinates(self):
         maximizeWindow(self.hwnd)
@@ -245,7 +247,7 @@ class Bot:
             self.getPartyList()
         else:
             if self.checkActionbarMoved():
-                print("actionbar moved")
+                print("actionbar moved, updating screen elements")
                 self.updateBoundElements()
                 
                 
@@ -853,12 +855,12 @@ class Bot:
         x = _x+25#x = _x+12  # constant
         first_pos = _y+30  # about mid of first square
         d = 22  # dist between boxes, 19+3
-
         if not self.isAttacking() and not self.buffs['pz']:
             for y in range(first_pos, _y2, d):
                     color = img.GetPixelRGBColor(self.hwnd,(x, y))
                     if (color == (0,0,0)):
                         click(self.hwnd,x, y)
+                        print("clicking on: "+str((x,y)))
                         #time.sleep(0.001)
                         return
     def stopAttacking(self):
@@ -1435,51 +1437,63 @@ class Bot:
         else:
             self.current_mark_index+=1
         self.current_mark = self.mark_list[self.current_mark_index]
+    
+    
     def getClosestMarks(self):
         compare_to_previous = True
         map_center = self.s_Map.center
         map_region = self.s_Map.region
-        map_relative_center = (map_center[0]-map_region[0],map_center[1]-map_region[1])
+        map_relative_center = (map_center[0]-map_region[0], map_center[1]-map_region[1])
         result = []
         discarded = []
-        map_image = img.screengrab_array(self.hwnd,map_region)
         
-        positions = img.locateManyImage(self.hwnd,"map_marks/"+self.current_mark+".png",map_region,0.97)
-        if not isinstance(self.previous_marks[self.current_mark],bool):
-            previous = img.locateImage(self.hwnd,self.previous_marks[self.current_mark],map_region,0.99)
+        # Get the screenshot and ensure it's in the right format for OpenCV
+        map_image = img.screengrab_array(self.hwnd, map_region)
+        
+        # Make sure map_image is a proper numpy array for OpenCV
+        if map_image is not None:
+            # Convert to numpy array if it's not already
+            map_image_np = np.array(map_image)
+        else:
+            # Create a blank image if screenshot failed
+            map_image_np = np.zeros((300, 300, 3), dtype=np.uint8)
+        
+        positions = img.locateManyImage(self.hwnd, "map_marks/"+self.current_mark+".png", map_region, 0.97)
+        if not isinstance(self.previous_marks[self.current_mark], bool):
+            previous = img.locateImage(self.hwnd, self.previous_marks[self.current_mark], map_region, 0.99)
         else:
             previous = False
-        '''
-        previous = []
-        for mark in self.previous_marks.keys():
-            pos = img.locateImage(self.hwnd,self.previous_marks[mark],map_region,0.99)
-            if pos:
-                previous.append(pos)
-        '''
+        
         if positions:
             if len(positions) > 0:
                 for pos in positions:
-                    x,y= pos[0]+int(pos[2])+4,pos[1]+int(pos[2])+3
-                    #if compare_to_previous:
-                    if self.compareMarkToPrevious((x,y),previous):
-                        #cv2.line(map_image,map_relative_center,(x,y),(255,0,0),2)
+                    x, y = pos[0]+int(pos[2])+4, pos[1]+int(pos[2])+3
+                    if self.compareMarkToPrevious((x,y), previous):
+                        # Draw line safely after ensuring map_image is a numpy array
+                        try:
+                            cv2.line(map_image_np, map_relative_center, (x,y), (255,0,0), 2)
+                        except Exception as e:
+                            print(f"Error drawing line: {e}")
+                        
                         dist = distance.euclidean(map_relative_center, (x,y))
-                        result.append((dist,(map_region[0] + x,map_region[1] + y)))
+                        result.append((dist, (map_region[0] + x, map_region[1] + y)))
                     else:
                         dist = distance.euclidean(map_relative_center, (x,y))
-                        discarded.append((dist,(map_region[0] + x,map_region[1] + y)))
-                            
-                    #else:
-                    #    cv2.line(map_image,map_relative_center,(x,y),(255,0,0),2)
-                    #    dist = distance.euclidean(map_relative_center, (x,y))
-                    #    result.append((dist,(map_region[0] + x,map_region[1] + y)))
+                        discarded.append((dist, (map_region[0] + x, map_region[1] + y)))
+        
         if len(result) == 0:
             result = discarded
-        result.sort(reverse = False)
-        
-        #img.visualize_fast(map_image)
+        result.sort(reverse=False)
+
+        # Store the image for the GUI
+        try:
+            self.current_map_image = map_image_np.copy()
+        except Exception as e:
+            print(f"Error copying map image: {e}")
+            self.current_map_image = np.zeros((300, 300, 3), dtype=np.uint8)
         
         return result
+    
     def compareMarkToPrevious(self,pos,previous):
         #for prev in previous:
         
@@ -1553,7 +1567,7 @@ class Bot:
             x, y, box_w, box_h = trade_bar
             region = (region[0], region[1]+y, region[2], region[3])
 
-            ok_button = img.locateImage(self.hwnd,'/hud/npc_trade_ok.png', region, 0.96, True)
+            ok_button = img.locateImage(self.hwnd,'/hud/npc_trade_ok.png', region, 0.96)
             print("ok_button",ok_button)
             x_ok, y_ok, ok_w, ok_h = ok_button
             time.sleep(0.1)
@@ -1578,6 +1592,8 @@ class Bot:
                 # = locateImage('npc_trade_can_sell.png', region, 0.97)
                 #image = img.screengrab_array(self.hwnd,current_item_region)
                 #img.visualize_fast(image)
+                # visualize current image region
+                img.visualize_fast(img.screengrab_array(self.hwnd,current_item_region))
                 can_sell = img.lookForColor(self.hwnd, (192, 192, 192), current_item_region, 2, 2)
                 print("can sell: "+str(can_sell))
                 if (can_sell):
@@ -1668,7 +1684,8 @@ if __name__ == "__main__":
     total_time = 0
     times = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
     start_time = time.time()
-    while(bot.loop.get()): 
+    
+    while(True): 
         #time.sleep(1)
         bot.GUI.loop()
         bot.updateWindowCoordinates()
@@ -1773,6 +1790,6 @@ if __name__ == "__main__":
         end = timeInMillis()
         duration = (end-start)
         #total_time+=duration
-        print("loop time: "+ str(round(duration, 3))+"ms average time: " + str(round(total_time/count, 3)) +"ms total time: " + str(round(total_time,3)) + "ms")
+        #print("loop time: "+ str(round(duration, 3))+"ms average time: " + str(round(total_time/count, 3)) +"ms total time: " + str(round(total_time,3)) + "ms")
         
         
