@@ -18,7 +18,7 @@ class ModernBotGUI:
         # Main window setup
         self.root = ctk.CTk()
         self.root.title(f"{char_name} - {str(bot.hwnd)}")
-        self.root.geometry("550x650")
+        self.root.geometry("550x700")
         self.root.resizable(False, False)
         
         # Initialize variables from bot and override bot attributes with Tkinter variables
@@ -124,7 +124,13 @@ class ModernBotGUI:
         self._setup_combat_tab(combat_tab)
         self._setup_navigation_tab(navigation_tab)
         self._setup_settings_tab(settings_tab)
-        
+
+    def _configure_entry(self, entry_widget):
+        """Helper method to configure entry widgets with proper selection behavior"""
+        entry_widget.bind("<FocusIn>", lambda event: entry_widget.select_range(0, 'end'))
+        entry_widget.bind("<Control-a>", lambda event: entry_widget.select_range(0, 'end'))
+        return entry_widget
+    
     def _setup_healing_tab(self, parent):
         """Setup healing settings"""
         # HP Healing section
@@ -146,7 +152,8 @@ class ModernBotGUI:
         
         light_entry = ctk.CTkEntry(light_frame, width=60, textvariable=self.traced_vars['hp_thresh_high'])
         light_entry.pack(side="left")
-        light_entry.configure(validate="key", validatecommand=(parent.register(self._validate_digit), "%P"))
+        self._configure_entry(light_entry)
+        #light_entry.configure(validate="key", validatecommand=(parent.register(self._validate_digit), "%P"))
         
         pct_label = ctk.CTkLabel(light_frame, text="%")
         pct_label.pack(side="left", padx=5)
@@ -160,7 +167,8 @@ class ModernBotGUI:
         
         heavy_entry = ctk.CTkEntry(heavy_frame, width=60, textvariable=self.traced_vars['hp_thresh_low'])
         heavy_entry.pack(side="left")
-        heavy_entry.configure(validate="key", validatecommand=(parent.register(self._validate_digit), "%P"))
+        self._configure_entry(heavy_entry)
+        #heavy_entry.configure(validate="key", validatecommand=(parent.register(self._validate_digit), "%P"))
         
         pct_label = ctk.CTkLabel(heavy_frame, text="%")
         pct_label.pack(side="left", padx=5)
@@ -183,7 +191,8 @@ class ModernBotGUI:
         
         mp_thresh_entry = ctk.CTkEntry(mp_thresh_frame, width=60, textvariable=self.traced_vars['mp_thresh'])
         mp_thresh_entry.pack(side="left")
-        mp_thresh_entry.configure(validate="key", validatecommand=(parent.register(self._validate_digit), "%P"))
+        self._configure_entry(mp_thresh_entry)
+        #mp_thresh_entry.configure(validate="key", validatecommand=(parent.register(self._validate_digit), "%P"))
         
         mp_pct_label = ctk.CTkLabel(mp_thresh_frame, text="%")
         mp_pct_label.pack(side="left", padx=5)
@@ -228,7 +237,8 @@ class ModernBotGUI:
         
         monsters_entry = ctk.CTkEntry(monsters_frame, width=60, textvariable=self.traced_vars['min_monsters_around_spell'])
         monsters_entry.pack(side="left")
-        monsters_entry.configure(validate="key", validatecommand=(parent.register(self._validate_digit), "%P"))
+        self._configure_entry(monsters_entry)
+        #monsters_entry.configure(validate="key", validatecommand=(parent.register(self._validate_digit), "%P"))
         
         # Kill amounts
         kill_frame = ctk.CTkFrame(combat_params_frame)
@@ -239,7 +249,8 @@ class ModernBotGUI:
         
         kill_entry = ctk.CTkEntry(kill_frame, width=60, textvariable=self.traced_vars['kill_amount']) 
         kill_entry.pack(side="left")
-        kill_entry.configure(validate="key", validatecommand=(parent.register(self._validate_digit), "%P"))
+        self._configure_entry(kill_entry)
+        #kill_entry.configure(validate="key", validatecommand=(parent.register(self._validate_digit), "%P"))
         
         # Kill stop amount
         kill_stop_frame = ctk.CTkFrame(combat_params_frame)
@@ -250,7 +261,8 @@ class ModernBotGUI:
         
         kill_stop_entry = ctk.CTkEntry(kill_stop_frame, width=60, textvariable=self.traced_vars['kill_stop_amount'])
         kill_stop_entry.pack(side="left")
-        kill_stop_entry.configure(validate="key", validatecommand=(parent.register(self._validate_digit), "%P"))
+        self._configure_entry(kill_stop_entry)
+        #kill_stop_entry.configure(validate="key", validatecommand=(parent.register(self._validate_digit), "%P"))
         
     def _setup_navigation_tab(self, parent):
         """Setup navigation settings with map visualization"""
@@ -275,14 +287,50 @@ class ModernBotGUI:
         leader_label.pack(side="left", padx=5)
         
         leader_entry = ctk.CTkEntry(leader_frame, width=160, textvariable=self.traced_vars['party_leader'])
+        self._configure_entry(leader_entry)
         leader_entry.pack(side="left", padx=5)
-        
+
         # Map visualization section
         map_frame = ctk.CTkFrame(parent)
         map_frame.pack(fill="both", expand=True, padx=20, pady=10)
-        
         map_title = ctk.CTkLabel(map_frame, text="Map Visualization", font=("Roboto", 14, "bold"))
         map_title.pack(anchor="w", padx=10, pady=5)
+        
+        # Add compact horizontal legend for map visualization
+        legend_frame = ctk.CTkFrame(map_frame)
+        legend_frame.pack(fill="x", padx=10, pady=5)
+
+
+        # Create a single horizontal frame with all legend items side by side
+        legend_title = ctk.CTkLabel(legend_frame, text="Legend:", anchor="w")
+        legend_title.pack(side="left", padx=5, pady=2)
+
+        # Green legend item
+        green_box = ctk.CTkLabel(legend_frame, text="", width=15, height=10, fg_color="green")
+        green_box.pack(side="left", padx=5)
+        green_text = ctk.CTkLabel(legend_frame, text="Closest mark")
+        green_text.pack(side="left", padx=2)
+
+        # Separator
+        separator1 = ctk.CTkLabel(legend_frame, text="|", width=5)
+        separator1.pack(side="left", padx=2)
+
+        # Blue legend item
+        blue_box = ctk.CTkLabel(legend_frame, text="", width=15, height=10, fg_color="blue")
+        blue_box.pack(side="left", padx=5)
+        blue_text = ctk.CTkLabel(legend_frame, text="Other marks")
+        blue_text.pack(side="left", padx=2)
+
+        # Separator
+        separator2 = ctk.CTkLabel(legend_frame, text="|", width=5)
+        separator2.pack(side="left", padx=2)
+
+        # Red legend item
+        red_box = ctk.CTkLabel(legend_frame, text="", width=15, height=10, fg_color="red")
+        red_box.pack(side="left", padx=5)
+        red_text = ctk.CTkLabel(legend_frame, text="Recently walked")
+        red_text.pack(side="left", padx=2)
+        
         
         # Create a placeholder for the map image
         map_container = ctk.CTkFrame(map_frame)
@@ -292,7 +340,6 @@ class ModernBotGUI:
         self.map_image_label = ctk.CTkLabel(map_container, text="Map will be displayed here")
         self.map_image_label.pack(fill="both", expand=True)
         
-
         self.root.update_idletasks()
 
     def _setup_settings_tab(self, parent):

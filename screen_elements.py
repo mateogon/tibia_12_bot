@@ -176,6 +176,7 @@ class ScreenElement(BaseElement):
         
     def update(self):
         self.updateSearchRegion()
+        print("searching for {} in region {}".format(self.name,self.search_region))
         found = img.locateImage(self.hwnd, self.folder+self.search_image, self.search_region, 0.96)
         if found:
             x2, y2, img_w , img_h = found
@@ -193,7 +194,7 @@ class ScreenElement(BaseElement):
             return False
         
 class ScreenWindow(ScreenElement):
-    right_region_function = lambda self,w,h: (w - 200, 0 , w, h)
+    right_region_function = lambda self,w,h: (w - 400, 0 , w, h)
     left_region_function = lambda self,w,h: (0, 0 , 200, h)
     
     def __init__(self, name,hwnd,search_image,button_position=None):
@@ -203,12 +204,14 @@ class ScreenWindow(ScreenElement):
     def update(self):
         game_w,game_h = self.getGameDimensions()
         region = self.right_region_function(game_w,game_h)
-        window_top = img.locateImage(self.hwnd, self.folder+self.search_image, region, 0.96)
-        window_bottom = img.locateManyImage(self.hwnd,self.folder+'battle_list_end.png', region, 0.94)
+        #img.visualize_fast(img.area_screenshot(self.hwnd,region))
+
+        window_top = img.locateImage(self.hwnd, self.folder+self.search_image, region, 0.90)
+        window_bottom = img.locateManyImage(self.hwnd,self.folder+'battle_list_end.png', region, 0.85)
         if not window_top:
             region = self.left_region_function(game_w,game_h)
-            window_top = img.locateImage(self.hwnd, self.folder+self.search_image, region, 0.96)
-            window_bottom = img.locateManyImage(self.hwnd,self.folder+'battle_list_end.png', region, 0.94)
+            window_top = img.locateImage(self.hwnd, self.folder+self.search_image, region, 0.90)
+            window_bottom = img.locateManyImage(self.hwnd,self.folder+'battle_list_end.png', region, 0.85)
         if not window_top:
             print("couldn't find {} on screen".format(self.name))
             self.detected = False

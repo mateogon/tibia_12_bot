@@ -183,27 +183,23 @@ class GUI:
         imageID.place(x=position[0], y=position[1])
         return imageID
 
-    def addEntry(self, position, var, width=12, validate_function = ""):
-        if (validate_function != ""):
-            entryID = tk.Entry(self.windowID,
-                            width=width,
-                            textvariable=var,
-                            bg=rgb((114, 0, 0)),
-                            borderwidth=2,
-                            foreground=rgb((81, 216, 0)),
-                            validate = 'all',
-                            )
+    def addEntry(self, position, var, width=12, validate_function=""):
+        entryID = tk.Entry(self.windowID,
+                        width=width,
+                        textvariable=var,
+                        bg=rgb((114, 0, 0)),
+                        borderwidth=2,
+                        foreground=rgb((81, 216, 0)),
+                        )
+        
+        # Add bindings to fix the text selection behavior
+        entryID.bind("<FocusIn>", lambda event: entryID.selection_range(0, 'end'))
+        entryID.bind("<Control-a>", lambda event: entryID.selection_range(0, 'end'))
+        
+        if validate_function != "":
             vcmd = entryID.register(validate_function)
-            entryID.configure(validatecommand=(vcmd, "%P"))
-            #entryID.entry[] = vcmd
-        else:
-            entryID = tk.Entry(self.windowID,
-                            width=width,
-                            textvariable=var,
-                            bg=rgb((114, 0, 0)),
-                            borderwidth=2,
-                            foreground=rgb((81, 216, 0)),
-                            )
+            entryID.configure(validate='all', validatecommand=(vcmd, "%P"))
+        
         entryID.place(x=position[0], y=position[1])
         return entryID
 

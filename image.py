@@ -11,7 +11,8 @@ from extras import timeit
 from math import sqrt
 from extras import timeInMillis
 #from natsort import natsorted
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+pytesseract.pytesseract.tesseract_cmd = r"C:\\Tesseract-OCR\\tesseract.exe"
+
 left = -8
 top = -8
 
@@ -26,7 +27,7 @@ def tesser_image(im, a, b, c, config):
     #
 
 def screengrab_array(hwnd,area, show=False):
-    im = area_screenshot(hwnd,area)
+    im = area_screenshot(hwnd,area,show)
     
     if show:
         visualize(im)
@@ -40,7 +41,7 @@ def visualize(img):
 def visualize_fast(img):
     cv2.imshow('im', img)
     
-def area_screenshot(hwnd,area):
+def area_screenshot(hwnd,area, show=False):
     left, top, right, bottom = win32gui.GetWindowRect(hwnd)
     game_h = bottom - top
     game_w = right - left
@@ -51,7 +52,7 @@ def area_screenshot(hwnd,area):
     saveBitMap.CreateCompatibleBitmap(mfcDC, game_w, game_h)
 
     saveDC.SelectObject(saveBitMap)
-    result = windll.user32.PrintWindow(hwnd, saveDC.GetSafeHdc(), 0)
+    result = windll.user32.PrintWindow(hwnd, saveDC.GetSafeHdc(), 2)
     bmpinfo = saveBitMap.GetInfo()
     bmpstr = saveBitMap.GetBitmapBits(True)
     im = PIL.Image.frombuffer(
@@ -110,7 +111,7 @@ def listColors(file):
     
 
 def locateImage(hwnd, file, region, thresh, show=False):
-    img_rgb = screengrab_array(hwnd, region)
+    img_rgb = screengrab_array(hwnd, region,show)
     
     if isinstance(file, str):
         template = cv2.imread('img/' + file)
@@ -132,7 +133,7 @@ def locateImage(hwnd, file, region, thresh, show=False):
             cv2.rectangle(img_rgb, pt, (pt[0] + w, pt[1] + h), (255, 0, 0), 1)
 
     try:
-        if show and pos is not None:
+        if show :
             visualize(img_rgb)
         if pos is not None:
             return (pos[0] + left, pos[1] + top, w, h)
@@ -142,8 +143,10 @@ def locateImage(hwnd, file, region, thresh, show=False):
         print(f"An error occurred: {e}")
         return False
 
-def locateManyImage(hwnd,file, region, thresh):
+def locateManyImage(hwnd,file, region, thresh, show=False):
     img_rgb = screengrab_array(hwnd,region)
+    if show:
+        img_rgb_vis = cv2.cvtColor( img_rgb, cv2.COLOR_BGR2GRAY)
 
     template = cv2.imread('img/'+file)
     height, width, channels = template.shape
@@ -153,12 +156,15 @@ def locateManyImage(hwnd,file, region, thresh):
     loc = np.where(res >= threshold)
     pos = []
     for pt in zip(*loc[::-1]):  # Switch collumns and rows
-        #cv2.rectangle(img_rgb, pt, (pt[0] + w, pt[1] + h), (255, 0, 0),1)
+        if show:
+            cv2.rectangle(img_rgb_vis, pt, (pt[0] + w, pt[1] + h), (255, 0, 0),1)
         pt = (pt[0]+left, pt[1]+top, w, h)
         pos.append(pt)
     try:
         # print(time.time()-start_time)
         #img = PIL.Image.fromarray(img_rgb).show()
+        if show:
+            visualize(img_rgb_vis)
         return pos
     except:
         return False
@@ -193,7 +199,7 @@ def ColorDistance(rgb1, rgb2):
     color_diff = sqrt((r - cr)**2 + (g - cg)**2 + (b - cb)**2)
     return color_diff
 
-def GetPixelRGBColor2(hwnd,pos):
+def GetPixelRGBColor(hwnd,pos):
     rect = win32gui.GetWindowRect(hwnd)
     w = abs(rect[2] - rect[0])
     h = abs(rect[3] - rect[1])
@@ -213,12 +219,11 @@ def GetPixelRGBColor2(hwnd,pos):
     mfcDC.DeleteDC()
     saveDC.DeleteDC()
     win32gui.ReleaseDC(hwnd, hwndDC)
-    win32gui.ReleaseDC(hwnd, hwndDC)
     win32gui.DeleteObject(saveBitMap.GetHandle())
 
     return (r, g, b)
 
-def GetPixelRGBColor(hwnd,pos):
+def GetPixelRGBColor2(hwnd,pos):
     
 
     hwndDC = win32gui.GetWindowDC(hwnd)
@@ -227,23 +232,21 @@ def GetPixelRGBColor(hwnd,pos):
         r, g, b = ret & 0xff, (ret >> 8) & 0xff, (ret >> 16) & 0xff
     except:
         r, b, g = 999, 999, 999
+    
     win32gui.ReleaseDC(hwnd, hwndDC)
     
     return (r, g, b)
 
 def lookForColor(hwnd,color, region, dx=3, dy=3,test = False):
     begin_x, begin_y, end_x, end_y = region
-    ret = False
     for x in range(begin_x, end_x, dx):
         for y in range(begin_y, end_y, dy):
+
             pix_color = GetPixelRGBColor(hwnd,(x, y))
             if (pix_color == color):
-                if test:
-                    print((x,y))
-                    ret = True
-                else:
+                    print(f"Found color {color} at ({x}, {y})")
                     return True
-    return ret
+    return False
 
 def lookForColors(hwnd,colors, region, dx=3, dy=3,absolute = False):
     begin_x, begin_y, end_x, end_y = region
@@ -264,3 +267,55 @@ def lookForColors(hwnd,colors, region, dx=3, dy=3,absolute = False):
 
 def rgb(rgb):  # Function to translate color to RGB
     return "#%02x%02x%02x" % rgb
+
+def sync_screenshot_with_pixel(hwnd, area, sample_point, offset_range=20):
+    """
+    Syncs the screenshot coordinates with the pixel RGB colors from GetPixelRGBColor.
+    
+    Parameters:
+        hwnd: Window handle.
+        area: Tuple (x, y, x2, y2) defining the crop region in the captured window image.
+              (Coordinates here are relative to the full captured image.)
+        sample_point: A tuple (x, y) within the cropped screenshot to sample (e.g., (10, 10)).
+        offset_range: Range (in pixels) to test for the offset (default: ±20).
+        
+    Returns:
+        best_offset: (dx, dy) that minimizes the difference between the screenshot's pixel color
+                     and the GetPixelRGBColor output.
+        best_error: The error value (sum of absolute differences) for that offset.
+        screenshot_color: The color from the screenshot at sample_point.
+        best_win_color: The GetPixelRGBColor output at the best offset.
+    """
+    # Capture screenshot of the area.
+    screenshot = area_screenshot(hwnd, area, show=False)
+    if screenshot is None:
+        print("Screenshot capture failed.")
+        return None
+    
+    # Note: numpy arrays use [row, col] ordering.
+    screenshot_color = screenshot[sample_point[1], sample_point[0]]
+    
+    # Get the window's absolute coordinates.
+    window_rect = win32gui.GetWindowRect(hwnd)
+    # The top-left of our screenshot corresponds to (window_rect[0] + area[0], window_rect[1] + area[1])
+    base_x = window_rect[0] + area[0]
+    base_y = window_rect[1] + area[1]
+    
+    best_offset = (0, 0)
+    best_error = float('inf')
+    best_win_color = None
+    
+    # Test candidate offsets.
+    for dx in range(-offset_range, offset_range + 1):
+        for dy in range(-offset_range, offset_range + 1):
+            test_x = base_x + sample_point[0] + dx
+            test_y = base_y + sample_point[1] + dy
+            win_color = GetPixelRGBColor(hwnd, (test_x, test_y))
+            # Compute error (sum of absolute differences)
+            error = sum(abs(int(sc) - int(wc)) for sc, wc in zip(screenshot_color, win_color))
+            if error < best_error:
+                best_error = error
+                best_offset = (dx, dy)
+                best_win_color = win_color
+    
+    return best_offset, best_error, tuple(screenshot_color), best_win_color

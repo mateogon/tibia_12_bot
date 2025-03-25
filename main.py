@@ -22,7 +22,7 @@ from scipy.ndimage import morphology
 from scipy.spatial import distance
 from scipy.stats import moment
 wsh= comclt.Dispatch("WScript.Shell")
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+pytesseract.pytesseract.tesseract_cmd = r"C:\\Tesseract-OCR\\tesseract.exe"
 
 #LOCAL
 import data
@@ -47,10 +47,14 @@ class Bot:
             print("You are not logged in.")
             exit()
             
-        
+        client_rect = win32gui.GetClientRect(self.hwnd)
+        self.width = client_rect[2]
+        self.height = client_rect[3]
+        print("width: "+str(self.width) + " height: "+str(self.height))
         self.left, self.top, self.right, self.bottom = win32gui.GetWindowRect(self.hwnd)
-        self.height = abs(self.bottom - self.top)
-        self.width = abs(self.right - self.left)
+        print("left: "+str(self.left) + " top: "+str(self.top) + " right: "+str(self.right) + " bottom: "+str(self.bottom))
+        #self.height = abs(self.bottom - self.top)
+        #self.width = abs(self.right - self.left)
         #green (0, 192, 0)
         #light green (96,192,96)
         #yellow (192,192,0)
@@ -73,7 +77,7 @@ class Bot:
 
         self.s_BattleList = ScreenWindow("BattleList",self.hwnd,'battle_list.png',2)
         self.s_Skills = ScreenWindow("Skills",self.hwnd,'skills.png',1)
-        self.s_Party = ScreenWindow("Party",self.hwnd,'party_list.png',3)
+        self.s_Party = ScreenWindow("Party",self.hwnd,'party_list.png',10)
         
         self.s_Map = RelativeScreenElement("Map",self.hwnd,self.s_Stop,(-118,-259,-52,-161)) #
         self.s_Bless = RelativeScreenElement("Bless",self.hwnd,self.s_Stop,(-104,-144,-135,-147))
@@ -107,7 +111,7 @@ class Bot:
         self.use_haste = True
         self.use_food = True
         
-        self.manage_equipment = True
+        self.manage_equipment = False
         self.use_ring = False
         self.use_amulet = False
         self.loot_on_spot = False
@@ -119,9 +123,9 @@ class Bot:
         self.player_list = {}
         self.player_list["Mateogon"] = {"vocation" :"knight", "spell_area" : 3}
         self.player_list["Master Liqui"] = {"vocation" :"knight", "spell_area" : 3}
-        self.player_list["Thurion"] = {"vocation" :"knight", "spell_area" : 6}
+        self.player_list["Thyrion"] = {"vocation" :"paladin", "spell_area" : 5}
         self.player_list["Zane"] = {"vocation" :"sorcerer", "spell_area" : 3}
-        self.player_list["Helios"] = {"vocation" :"knight", "spell_area" : 3}
+        self.player_list["Helios"] = {"vocation" :"druid", "spell_area" : 6}
         self.player_list["Kaz"] = {"vocation" :"druid", "spell_area" : 6}
         self.party_leader = "Mateogon"
         self.vocation = self.player_list[self.character_name]["vocation"]
@@ -186,7 +190,7 @@ class Bot:
         self.eat_hotkey = '+'
         self.food_slot = 12
         self.sio_slot = 14
-        self.magic_shield_slot = 31
+        self.magic_shield_slot = 16
         self.cancel_magic_shield_slot = 32
         self.magic_shield_enabled = False
         # starts at 0
@@ -207,7 +211,7 @@ class Bot:
         self.last_walk_time = timeInMillis()
         self.last_lure_click_time = timeInMillis()
         self.kill_amount = 4
-        self.kill_stop_amount = 0
+        self.kill_stop_amount = 1
         self.kill_stop_time = 120
         self.lure_amount = 2
         self.kill = False
@@ -283,7 +287,7 @@ class Bot:
                         if elem.button_position:
                             print("clicking button for window: "+ elem.name + " position: "+str(elem.button_position))
                             self.clickWindowButton(elem.button_position)
-                            #time.sleep(0.5)
+                            time.sleep(1)
                         else:
                             print("window button position is None")
                             break      
@@ -330,7 +334,6 @@ class Bot:
             #print(img.GetPixelRGBColor(self.hwnd, (x,y)))
             #img.lookForColor(self.hwnd, (117,117,117) ,(x-5,y-5,x+5,y+5), 1, 1,True)
             pixel_color = img.GetPixelRGBColor(self.hwnd, (x,y))
-            
             if pixel_color !=  (114, 115, 115):#(117,117,117):
                 print(pixel_color)
                 return True
@@ -370,6 +373,7 @@ class Bot:
         return (x,y)
     def clickActionbarSlot(self,pos):
         x,y = self.getActionbarSlotPosition(pos)
+        print("clicking actionbar slot: "+str(pos) + " at: "+str((x,y)))
         click(self.hwnd,x,y)
     def updateActionbarSlotStatus(self):
         for i in range(0,30):
@@ -386,7 +390,7 @@ class Bot:
     def isActionbarSlotEnabled(self,i):
         
         x,y = self.getActionbarSlotPosition(i)
-        #img.screengrab_array(self.hwnd,(x,y,x+34,y+34),True)
+        img.screengrab_array(self.hwnd,(x,y,x+34,y+34))
         color = img.GetPixelRGBColor(self.hwnd,(x,y))
         if color == (114,115,115):
             return False
@@ -468,7 +472,7 @@ class Bot:
         half_tile = tile_h/2
         radius = int(tile_h*(area*3/5))
         #print("tile_h "+str(tile_h)+ " radius " +str(radius) + " area "+str(area))
-        #image = img.screengrab_array(self.hwnd, self.s_GameScreen.region)
+        image = img.screengrab_array(self.hwnd, self.s_GameScreen.region)
         #cv2.circle(image,center,radius,(255,0,0),2)
         
         
@@ -652,7 +656,6 @@ class Bot:
     def getHealth(self):
         cant = 0
         region = self.s_Health.region
-        
         y = region[1]+6
         bar_width = self.s_Health.getWidth()
         delta = 4
@@ -702,6 +705,7 @@ class Bot:
     
     def manageHealth(self):
         self.getHealth()
+        print("hppc: "+str(self.hppc))
         self.hp_queue.pop()
         self.hp_queue.appendleft(self.hppc)
 
@@ -860,7 +864,6 @@ class Bot:
                     color = img.GetPixelRGBColor(self.hwnd,(x, y))
                     if (color == (0,0,0)):
                         click(self.hwnd,x, y)
-                        print("clicking on: "+str((x,y)))
                         #time.sleep(0.001)
                         return
     def stopAttacking(self):
@@ -1015,6 +1018,7 @@ class Bot:
                     monster_positions.append((0, 0))  # Optional: handle differently
 
         return monster_positions
+    
     def useAreaRune(self,test = False):
         if not test and (self.buffs['pz'] or self.monsterCount() <= 1):
             return
@@ -1103,14 +1107,26 @@ class Bot:
     def useAreaAmmo(self):
         if self.buffs['pz'] or self.isAttacking() or self.monsterCount() == 0:
             return
-        contours,opening = self.getModnstersAroundContours(9)
+        contours_list = self.getMonstersAroundContours(9)
+        
+        # Process each contour tuple in the list
+        all_cnts = []
+        for contours in contours_list:
+            try:
+                cnts = imutils.grab_contours(contours)
+                all_cnts.extend(cnts)  # Add these contours to our working set
+            except Exception as e:
+                continue  # Skip invalid contours
+        
+        # Now use all_cnts instead of cnts in the rest of your function
         region = self.s_GameScreen.region
         tile = self.s_GameScreen.tile_w
         tile_radius = 3
-        cnts = imutils.grab_contours(contours)
         min_cont = False
         min_neighbors_list = []
-        for cur in cnts:
+        
+        # Rest of your function using all_cnts instead of cnts
+        for cur in all_cnts:
             neighbors_list = []
             # compute the center of the contour
             M = cv2.moments(cur)
@@ -1141,12 +1157,12 @@ class Bot:
         if min_cont is not False:
             if len(min_neighbors_list) > 2:
                 offset = int(2*tile/3)
-                cv2.circle(opening,min_cont, int(tile*tile_radius), (255,0,0), 2)
+                #cv2.circle(opening,min_cont, int(tile*tile_radius), (255,0,0), 2)
                 #
                 image = img.screengrab_array(self.hwnd,region)
                 pos = (region[0]+min_cont[0],region[1]+min_cont[1]+offset)
-                cv2.circle(image,(min_cont[0],min_cont[1]),7,(0,255,0),-1)
-                img.visualize_fast(image)
+                #cv2.circle(image,(min_cont[0],min_cont[1]),7,(0,255,0),-1)
+                #img.visualize_fast(image)
                 rclick(self.hwnd,pos[0],pos[1])
     
     
@@ -1209,17 +1225,18 @@ class Bot:
             for slot in self.equipment_slots:
                 if self.slot_status[slot]:
                     if self.isActionbarSlotEnabled(slot):
-                        if monster_count == 0:
+                        if monster_count == 0 :
+                            print("disabling ring")
                             self.clickActionbarSlot(slot)
                             #press(self.hwnd,self.ring_hotkey)
-                            #time.sleep(0.05)
+                            time.sleep(0.05)
                     else:
                         if monster_count > 0:
-                            #print("disabling ring")
+                            print("enabling ring")
                             self.clickActionbarSlot(slot)
                             #self.last_equip_time = timeInMillis()
                             #press(self.hwnd,self.ring_hotkey)
-                            #time.sleep(0.05)
+                            time.sleep(0.05)
             self.last_equip_time = timeInMillis()
             
     def isFollowing(self):
@@ -1365,7 +1382,7 @@ class Bot:
                 self.nextMark()
             else:
                 index = 0
-                dist, pos = marks[index]
+                dist, pos, _ = marks[index]  # Unpack 3 values and ignore the third one
                 #print(dist)
                 if dist <= 3:
                     #print("reached current mark")
@@ -1377,12 +1394,7 @@ class Bot:
                         #print("clicking mark")
                         click(self.hwnd,pos[0],pos[1])
                         self.last_walk_time = timeInMillis()
-                        '''
-                        if monster_count >= self.lure_amount and monster_count < self.kill_amount:
-                            
-                                #pos = self.s_Map.getCenter()#self.s_GameScreen.getCenter()
-                                #click(self.hwnd,pos[0],pos[1])
-                        '''
+
     def cavebot_distance(self):
         marks = self.getClosestMarks()
         monster_count = self.monsterCount()
@@ -1469,21 +1481,32 @@ class Bot:
                 for pos in positions:
                     x, y = pos[0]+int(pos[2])+4, pos[1]+int(pos[2])+3
                     if self.compareMarkToPrevious((x,y), previous):
-                        # Draw line safely after ensuring map_image is a numpy array
-                        try:
-                            cv2.line(map_image_np, map_relative_center, (x,y), (255,0,0), 2)
-                        except Exception as e:
-                            print(f"Error drawing line: {e}")
-                        
                         dist = distance.euclidean(map_relative_center, (x,y))
-                        result.append((dist, (map_region[0] + x, map_region[1] + y)))
+                        result.append((dist, (map_region[0] + x, map_region[1] + y), (x, y)))
                     else:
                         dist = distance.euclidean(map_relative_center, (x,y))
-                        discarded.append((dist, (map_region[0] + x, map_region[1] + y)))
+                        discarded.append((dist, (map_region[0] + x, map_region[1] + y), (x, y)))
         
         if len(result) == 0:
             result = discarded
         result.sort(reverse=False)
+        
+        # Draw lines for visualization with color coding
+        try:
+            # Draw previous mark in red if it exists
+            if not isinstance(previous, bool):
+                prev_x, prev_y, w, h = previous
+                prev_pos = (prev_x + w + 4, prev_y + h + 3)
+                cv2.line(map_image_np, map_relative_center, prev_pos, (0, 0, 255), 1)  # Red for previous mark
+            
+            # Draw best option in green and secondary options in blue
+            for i, (_, _, (x, y)) in enumerate(result):
+                if i == 0:
+                    cv2.line(map_image_np, map_relative_center, (x, y), (0, 255, 0), 2)  # Green for best option (thicker)
+                else:
+                    cv2.line(map_image_np, map_relative_center, (x, y), (255, 0, 0), 1)  # Blue for secondary options
+        except Exception as e:
+            print(f"Error drawing lines: {e}")
 
         # Store the image for the GUI
         try:
@@ -1553,7 +1576,8 @@ class Bot:
         self.s_Stop.region
     
     def getNPCTrade(self):
-        region = (self.width-200, 0, self.width, self.height)
+        region = (self.width-400, 0, self.width, self.height)
+        print("region",region)
         trade_bar = img.locateImage(self.hwnd,'/hud/npc_trade.png', region, 0.96)
         if not(trade_bar):
             region = (0, 0, 200, self.height)
@@ -1627,29 +1651,28 @@ class Bot:
     
     def sellAllNPC(self):    
         self.setChatStatus("on")
-        time.sleep(0.3)
+        time.sleep(0.6)
         press(self.hwnd, 'h','i')
-        time.sleep(0.3)
+        time.sleep(0.6)
         press(self.hwnd,'enter')
-        time.sleep(0.3)
+        time.sleep(0.6)
         press(self.hwnd, 't','r','a','d','e')
-        time.sleep(0.3)
+        time.sleep(0.6)
         press(self.hwnd,'enter')
-        time.sleep(0.08)
+        time.sleep(0.5)
         count = 0
         while not self.getNPCTrade():
             if (self.isAttacking()):
                 return
             print("waiting for npc trade window")
-            time.sleep(0.05)
+            time.sleep(0.1)
             count += 1
             if (count > 10):
                 time.sleep(0.08)
                 press(self.hwnd,'b', 'y', 'e')
                 time.sleep(0.08)
                 press(self.hwnd,'enter')
-                time.sleep(0.08)
-                self.sellAllNPC()
+                time.sleep(0.25)
                 return
         self.setChatStatus('off')
 
@@ -1662,15 +1685,21 @@ class Bot:
         elif self.key_pressed == keyboard.Key.end:
             bot.use_area_rune.set(value = not bot.use_area_rune.get())
         elif self.key_pressed == keyboard.Key.alt_gr:
-            self.sellAllNPC()
+            pass
+            #self.sellAllNPC()
         self.key_pressed = False
     
+    def test(self):
+        print("test")
+        offset, error, ss_color, win_color = img.sync_screenshot_with_pixel(self.hwnd, (100, 100, 300, 300), (10, 10))
+        print("Best offset:", offset)
+        print("Error:", error)
+        print("Screenshot color:", ss_color)
+        print("Window color:", win_color)
 if __name__ == "__main__":
     
-    
-    
-    
     bot = Bot()
+    bot.test()
     bot.updateAllElements()
     bot.updateActionbarSlotStatus()
     bot.getPartyList()
