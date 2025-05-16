@@ -53,6 +53,7 @@ class Bot:
         print("width: "+str(self.width) + " height: "+str(self.height))
         self.left, self.top, self.right, self.bottom = win32gui.GetWindowRect(self.hwnd)
         print("left: "+str(self.left) + " top: "+str(self.top) + " right: "+str(self.right) + " bottom: "+str(self.bottom))
+
         #self.height = abs(self.bottom - self.top)
         #self.width = abs(self.right - self.left)
         #green (0, 192, 0)
@@ -122,6 +123,7 @@ class Bot:
         
         self.player_list = {}
         self.player_list["Mateogon"] = {"vocation" :"knight", "spell_area" : 3}
+        self.player_list["Mateo Gon"] = {"vocation" :"knight", "spell_area" : 3}
         self.player_list["Master Liqui"] = {"vocation" :"knight", "spell_area" : 3}
         self.player_list["Thyrion"] = {"vocation" :"paladin", "spell_area" : 5}
         self.player_list["Zane"] = {"vocation" :"sorcerer", "spell_area" : 3}
@@ -267,6 +269,7 @@ class Bot:
         for elem_type in self.ElementsLists:
             for elem in elem_type:
                 if not elem.detected:
+                    print("element not detected: "+elem.name)
                     return True
         return False
     def updateAllElements(self):
@@ -341,7 +344,7 @@ class Bot:
     def updateChatStatusButtonRegion(self):
         #region = (self.width-300, self.height-30, self.width-100, self.height)
         region = (self.width-500, self.height-300, self.width, self.height)
-        button = img.locateImage(self.hwnd,'hud/chat_enabled_button.png', region, 0.96)
+        button = img.locateImage(self.hwnd,'hud/chat_enabled_button.png', region, 0.96,True)
         if (button):
             x, y, b_w, b_h = button
             x = x+region[0]-self.left
@@ -471,8 +474,10 @@ class Bot:
         tile_h = self.s_GameScreen.tile_h
         half_tile = tile_h/2
         radius = int(tile_h*(area*3/5))
+        print("GameScreen region: "+str(self.s_GameScreen.region))
         #print("tile_h "+str(tile_h)+ " radius " +str(radius) + " area "+str(area))
         image = img.screengrab_array(self.hwnd, self.s_GameScreen.region)
+        
         #cv2.circle(image,center,radius,(255,0,0),2)
         
         
@@ -545,7 +550,10 @@ class Bot:
     def getMonstersAroundContours(self,area,test = False,test2 = False):
         #start = timeInMillis()
         #test = False
+        self.s_GameScreen.visualize()
         region = self.s_GameScreen.getNamesArea(area)
+        print("GameScreen region: "+str(self.s_GameScreen.region))
+        print("region: "+str(region))
         image = img.screengrab_array(self.hwnd,region,test)
         ar = np.asarray(image) # get all pixels
         n = self.monster_around_scale_ratio
@@ -952,7 +960,7 @@ class Bot:
         
         
         if test:
-            opening = img.screengrab_array(self.hwnd,self.s_GameScreen.region)
+            opening = img.screengrab_array(self.hwnd,self.s_GameScreen.region, True)
         
         monster_positions = []
         offset_x = int(self.s_GameScreen.tile_h/4) #offset because names are offset from tile
@@ -1617,7 +1625,6 @@ class Bot:
                 #image = img.screengrab_array(self.hwnd,current_item_region)
                 #img.visualize_fast(image)
                 # visualize current image region
-                img.visualize_fast(img.screengrab_array(self.hwnd,current_item_region))
                 can_sell = img.lookForColor(self.hwnd, (192, 192, 192), current_item_region, 2, 2)
                 print("can sell: "+str(can_sell))
                 if (can_sell):

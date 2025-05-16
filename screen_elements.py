@@ -60,12 +60,14 @@ class BoundScreenElement(BaseElement):
         game_w,game_h = self.getGameDimensions()
         region_start = self.search_region_start_function(game_w,game_h)
         region_end = self.search_region_end_function(game_w,game_h)
-        found_start = img.locateImage(self.hwnd, self.folder+self.search_image_start, region_start, 0.96)
-        found_end = img.locateImage(self.hwnd,self.folder+self.search_image_end, region_end, 0.96)
+        found_start = img.locateImage(self.hwnd, self.folder+self.search_image_start, region_start, 0.90)
+        found_end = img.locateImage(self.hwnd,self.folder+self.search_image_end, region_end, 0.90)
         if not found_start or not found_end:
             self.detected = False
             print("couldn't find BoundScreenElement "+ self.name+ " start or end")
             return False
+        else:
+            print("found BoundScreenElement "+ self.name+ " start or end")
         x1, y1, width, height = found_start
         x1 += region_start[0]-self.LEFT
         y1 += region_start[1]-self.TOP
@@ -96,12 +98,18 @@ class GameScreenElement(BaseElement):
         game_w,game_h = self.getGameDimensions()
         region_start = self.search_region_start_function(game_w,game_h)
         region_end = self.search_region_end_function(game_w,game_h)
-        found_start = img.locateImage(self.hwnd, self.folder+self.search_image_start, region_start, 0.96)
-        found_end = img.locateImage(self.hwnd,self.folder+self.search_image_end, region_end, 0.96)
+        found_start = img.locateImage(self.hwnd, self.folder+self.search_image_start, region_start, 0.96,True)
+        found_end = img.locateImage(self.hwnd,self.folder+self.search_image_end, region_end, 0.96,True)
         if not found_start or not found_end:
             self.detected = False
             print("couldn't find GameScreen start or end")
             return False
+        else:
+            if found_start:
+                print("found GameScreen start")
+            if found_end:
+                print("found GameScreen end")
+        # TODO FIX THIS SHIT SO ITS MORE ROBUST
         x1, y1, width, height = found_start
         x1 += region_start[0]-self.LEFT
         y1 += region_start[1]-self.TOP+54
@@ -110,20 +118,24 @@ class GameScreenElement(BaseElement):
         y2 += region_end[1]-self.TOP-26
         pix = (0,0,0)
         flag = False
+        print("scanning for GameScreen boundaries")
         for i in range(200, 1000):
             pix = img.GetPixelRGBColor(self.hwnd,(x1+i,y1))
             if (img.ColorDistance(pix,(22,22,22)) < 5):
                 x1 = x1+i
+                print("found GameScreen left boundary")
                 break
         for i in range(x1,x2,20):#fast scan to see where line ends
             pix = img.GetPixelRGBColor(self.hwnd,(i,y1))
             if (img.ColorDistance(pix,(22,22,22)) > 15):
                 x2 = i
+                print("found GameScreen right boundary fuzzy")
                 break
         for i in range(x2,x2-30,-1):
             pix = img.GetPixelRGBColor(self.hwnd,(i,y1))
             if (img.ColorDistance(pix,(22,22,22)) < 5):
                 x2 = i
+                print("found GameScreen right boundary precise")
                 flag = True
                 break
         self.region = (x1+self.start_offsets[0], y1+self.start_offsets[1], x2+self.end_offsets[0], y2+height+self.end_offsets[1])
@@ -133,6 +145,7 @@ class GameScreenElement(BaseElement):
         self.updateAreas()
         self.updateTilesAroundPlayer()
         return flag
+
     def updateAreas(self):
         center_tile = (7,5)
         for i in range(1,8):
@@ -206,11 +219,11 @@ class ScreenWindow(ScreenElement):
         region = self.right_region_function(game_w,game_h)
         #img.visualize_fast(img.area_screenshot(self.hwnd,region))
 
-        window_top = img.locateImage(self.hwnd, self.folder+self.search_image, region, 0.90)
+        window_top = img.locateImage(self.hwnd, self.folder+self.search_image, region, 0.85)
         window_bottom = img.locateManyImage(self.hwnd,self.folder+'battle_list_end.png', region, 0.85)
         if not window_top:
             region = self.left_region_function(game_w,game_h)
-            window_top = img.locateImage(self.hwnd, self.folder+self.search_image, region, 0.90)
+            window_top = img.locateImage(self.hwnd, self.folder+self.search_image, region, 0.85)
             window_bottom = img.locateManyImage(self.hwnd,self.folder+'battle_list_end.png', region, 0.85)
         if not window_top:
             print("couldn't find {} on screen".format(self.name))
@@ -235,6 +248,7 @@ class ScreenWindow(ScreenElement):
             self.region = (region[0]+top_x - self.LEFT, region[1] + top_y - self.TOP,
                            region[0]+top_x + top_width - self.LEFT, region[1] + bottom_y + bottom_height - self.TOP)
             self.detected = True
+            print("found {} on screen".format(self.name))
             return True
 
 class RelativeScreenElement(BaseElement):
