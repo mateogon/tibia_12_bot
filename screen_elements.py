@@ -4,6 +4,8 @@ import win32gui
 import operator
 import image as img
 from abc import ABC
+import cv2
+import numpy as np
 # endregion
 
 class BaseElement(ABC):
@@ -78,6 +80,73 @@ class BoundScreenElement(BaseElement):
         self.region = (x1+width+self.start_offsets[0], y1+self.start_offsets[1], x2+self.end_offsets[0], y2+height+self.end_offsets[1])
         self.detected = True
         return True
+    
+
+def find_bounding_box_black_border(
+    screenshot, color_min=(14,14,14), color_max=(24,24,24), 
+    visualize=False, show_mask=False, border_frac=0.6
+):
+    mask = np.all((screenshot >= color_min) & (screenshot <= color_max), axis=2)
+    H, W = mask.shape
+
+    if show_mask:
+        mask_vis = (mask.astype(np.uint8)) * 255
+        mask_vis = cv2.cvtColor(mask_vis, cv2.COLOR_GRAY2BGR)
+        cv2.imshow("DEBUG: Border Color Mask", mask_vis)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+    # 1. Find the "border row" with most border pixels (top border)
+    row_sum = mask.sum(axis=1)
+    top_row = np.argmax(row_sum)
+    # The left/right ends of the top border
+    top_border_indices = np.where(mask[top_row])[0]
+    left = top_border_indices[0]
+    right = top_border_indices[-1]
+
+    # 2. Find the "border column" with most border pixels (left border)
+    col_sum = mask.sum(axis=0)
+    left_col = np.argmax(col_sum)
+    # The top/bottom ends of the left border
+    left_border_indices = np.where(mask[:, left_col])[0]
+    top = left_border_indices[0]
+    bottom = left_border_indices[-1]
+
+    # 3. For robustness, check the opposite borders:
+    # Bottom border: look at the row with max sum near the bottom
+    bottom_row = len(row_sum) - 1 - np.argmax(row_sum[::-1])
+    bottom_border_indices = np.where(mask[bottom_row])[0]
+    left2 = bottom_border_indices[0]
+    right2 = bottom_border_indices[-1]
+
+    # Right border: look at the col with max sum near the right
+    right_col = len(col_sum) - 1 - np.argmax(col_sum[::-1])
+    right_border_indices = np.where(mask[:, right_col])[0]
+    top2 = right_border_indices[0]
+    bottom2 = right_border_indices[-1]
+
+    # 4. Final box is intersection of all
+    final_left = min(left, left2)
+    final_right = max(right, right2)
+    final_top = min(top, top2)
+    final_bottom = max(bottom, bottom2)
+
+    print(f"[DEBUG] Top border at row {top_row}, columns {left}-{right}")
+    print(f"[DEBUG] Bottom border at row {bottom_row}, columns {left2}-{right2}")
+    print(f"[DEBUG] Left border at col {left_col}, rows {top}-{bottom}")
+    print(f"[DEBUG] Right border at col {right_col}, rows {top2}-{bottom2}")
+    print(f"[DEBUG] Final box: left={final_left}, top={final_top}, right={final_right}, bottom={final_bottom}")
+
+    if visualize:
+        vis_img = screenshot.copy()
+        cv2.rectangle(vis_img, (final_left, final_top), (final_right, final_bottom), (0,255,0), 2)
+        cv2.imshow("Detected GameScreen Region", vis_img)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+    return final_left, final_top, final_right+1, final_bottom+1
+
+
 class GameScreenElement(BaseElement):
     tiles_x = 15 #number of screen tiles in x
     tiles_y = 11 #number of screen tiles in y
@@ -93,58 +162,53 @@ class GameScreenElement(BaseElement):
         self.areas = {3: False, 4:False,5:False,6:False,7:False,8:False,9:False} # 3x3, 4x4, 5x5, 6x6 tile areas around center tile(player)
         self.tiles_around_player = []
         super().__init__(name,hwnd)
-        
+    
+
     def update(self):
-        game_w,game_h = self.getGameDimensions()
-        region_start = self.search_region_start_function(game_w,game_h)
-        region_end = self.search_region_end_function(game_w,game_h)
-        found_start = img.locateImage(self.hwnd, self.folder+self.search_image_start, region_start, 0.96,True)
-        found_end = img.locateImage(self.hwnd,self.folder+self.search_image_end, region_end, 0.96,True)
+        game_w, game_h = self.getGameDimensions()
+        region_start = self.search_region_start_function(game_w, game_h)
+        region_end = self.search_region_end_function(game_w, game_h)
+        found_start = img.locateImage(self.hwnd, self.folder+self.search_image_start, region_start, 0.96)
+        found_end = img.locateImage(self.hwnd, self.folder+self.search_image_end, region_end, 0.96)
         if not found_start or not found_end:
             self.detected = False
             print("couldn't find GameScreen start or end")
             return False
-        else:
-            if found_start:
-                print("found GameScreen start")
-            if found_end:
-                print("found GameScreen end")
-        # TODO FIX THIS SHIT SO ITS MORE ROBUST
+
         x1, y1, width, height = found_start
-        x1 += region_start[0]-self.LEFT
-        y1 += region_start[1]-self.TOP+54
+        x1 += region_start[0] - self.LEFT
+        y1 += region_start[1] - self.TOP + 54
         x2, y2, _, _ = found_end
-        x2 += region_end[0]-self.LEFT
-        y2 += region_end[1]-self.TOP-26
-        pix = (0,0,0)
-        flag = False
-        print("scanning for GameScreen boundaries")
-        for i in range(200, 1000):
-            pix = img.GetPixelRGBColor(self.hwnd,(x1+i,y1))
-            if (img.ColorDistance(pix,(22,22,22)) < 5):
-                x1 = x1+i
-                print("found GameScreen left boundary")
-                break
-        for i in range(x1,x2,20):#fast scan to see where line ends
-            pix = img.GetPixelRGBColor(self.hwnd,(i,y1))
-            if (img.ColorDistance(pix,(22,22,22)) > 15):
-                x2 = i
-                print("found GameScreen right boundary fuzzy")
-                break
-        for i in range(x2,x2-30,-1):
-            pix = img.GetPixelRGBColor(self.hwnd,(i,y1))
-            if (img.ColorDistance(pix,(22,22,22)) < 5):
-                x2 = i
-                print("found GameScreen right boundary precise")
-                flag = True
-                break
-        self.region = (x1+self.start_offsets[0], y1+self.start_offsets[1], x2+self.end_offsets[0], y2+height+self.end_offsets[1])
-        self.tile_h = self.getHeight()/self.tiles_y
-        self.tile_w = self.getWidth()/self.tiles_x
-        self.detected = flag
+        x2 += region_end[0] - self.LEFT
+        y2 += region_end[1] - self.TOP - 26
+
+        print(f"[DEBUG] Candidate area (x1,y1,x2,y2): ({x1},{y1},{x2},{y2+height})")
+
+        # Take a large enough crop to include the game screen fully
+        candidate_area = (x1, y1, x2, y2+height)
+        screenshot = img.screengrab_array(self.hwnd, candidate_area)
+
+        # Pass visualize=True to show the result
+        left, top, right, bottom = find_bounding_box_black_border(
+            screenshot, color_min=(14,14,14), color_max=(24,24,24), visualize=False
+        )
+
+        # Convert relative to absolute screen coords
+        abs_left = x1 + left
+        abs_top = y1 + top
+        abs_right = x1 + right
+        abs_bottom = y1 + bottom
+
+        print(f"[DEBUG] Absolute detected region: ({abs_left}, {abs_top}, {abs_right}, {abs_bottom})")
+        print(f"[DEBUG] Absolute region size: width={abs_right-abs_left}, height={abs_bottom-abs_top}")
+
+        self.region = (abs_left, abs_top, abs_right, abs_bottom)
+        self.tile_h = self.getHeight() / self.tiles_y
+        self.tile_w = self.getWidth() / self.tiles_x
+        self.detected = True
         self.updateAreas()
         self.updateTilesAroundPlayer()
-        return flag
+        return True
 
     def updateAreas(self):
         center_tile = (7,5)

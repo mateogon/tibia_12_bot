@@ -244,7 +244,6 @@ def lookForColor(hwnd,color, region, dx=3, dy=3,test = False):
 
             pix_color = GetPixelRGBColor(hwnd,(x, y))
             if (pix_color == color):
-                    print(f"Found color {color} at ({x}, {y})")
                     return True
     return False
 

@@ -252,7 +252,7 @@ class Bot:
             self.updateAllElements()
             self.getPartyList()
         else:
-            if self.checkActionbarMoved():
+            if self.checkActionbarMoved(): #self.checkGameScreenMoved():
                 print("actionbar moved, updating screen elements")
                 self.updateBoundElements()
                 
@@ -341,6 +341,22 @@ class Bot:
                 print(pixel_color)
                 return True
         return False
+    
+    def checkGameScreenMoved(self, color_min=(14,14,14), color_max=(28,28,28)):
+        """
+        Checks if the bottom-left pixel of the current gamescreen region is still within the border color range.
+        Returns True if the screen moved/changed (pixel is NOT in range), False if it stayed.
+        """
+        # Get bottom-left corner pixel of the current gamescreen region
+        x = self.s_GameScreen.region[0]      # left
+        y = self.s_GameScreen.region[3] -1  # bottom (y2 is exclusive)
+        pixel = img.GetPixelRGBColor(self.hwnd, (x, y))
+        # Check if pixel is in the expected color range
+        in_range = all(color_min[i] <= pixel[i] <= color_max[i] for i in range(3))
+        print(f"[DEBUG] Bottom-left pixel at ({x},{y}) = {pixel}, in_range = {in_range}")
+
+        return not in_range  # True if moved, False if not moved
+
     def updateChatStatusButtonRegion(self):
         #region = (self.width-300, self.height-30, self.width-100, self.height)
         region = (self.width-500, self.height-300, self.width, self.height)
@@ -465,7 +481,7 @@ class Bot:
         #win32api.PostMessage(self.hwnd, win32con.WM_KEYUP, 0x10, 0)
 
     
-    def getMonstersAround(self,area,test = False , test2 = False):
+    def getMonstersAround(self,area,test = True , test2 = False):
         #contours,_ = self.getMonstersAroundContours(area,test, test2)
         #print(len(contours[0])-1)
         #return len(contours[0])-1
@@ -474,9 +490,8 @@ class Bot:
         tile_h = self.s_GameScreen.tile_h
         half_tile = tile_h/2
         radius = int(tile_h*(area*3/5))
-        print("GameScreen region: "+str(self.s_GameScreen.region))
         #print("tile_h "+str(tile_h)+ " radius " +str(radius) + " area "+str(area))
-        image = img.screengrab_array(self.hwnd, self.s_GameScreen.region)
+        #image = img.screengrab_array(self.hwnd, self.s_GameScreen.region)
         
         #cv2.circle(image,center,radius,(255,0,0),2)
         
@@ -550,10 +565,8 @@ class Bot:
     def getMonstersAroundContours(self,area,test = False,test2 = False):
         #start = timeInMillis()
         #test = False
-        self.s_GameScreen.visualize()
+        #self.s_GameScreen.visualize()
         region = self.s_GameScreen.getNamesArea(area)
-        print("GameScreen region: "+str(self.s_GameScreen.region))
-        print("region: "+str(region))
         image = img.screengrab_array(self.hwnd,region,test)
         ar = np.asarray(image) # get all pixels
         n = self.monster_around_scale_ratio
@@ -713,7 +726,7 @@ class Bot:
     
     def manageHealth(self):
         self.getHealth()
-        print("hppc: "+str(self.hppc))
+        #print("hppc: "+str(self.hppc))
         self.hp_queue.pop()
         self.hp_queue.appendleft(self.hppc)
 
@@ -813,18 +826,18 @@ class Bot:
        
         #img.visualize(battlelist)
     def isAttacking(self):
-        b_x, b_y,_,b_y2 = self.s_BattleList.region
+        b_x, b_y,b_x2,b_y2 = self.s_BattleList.region
         #w, h = self.s_BattleList.getWidth(),self.s_BattleList.getHeight()
         # x 3 y 22
-        #found = lookForColor([(255,0,0),(255,128,128)],(x,y,w-150,h))
-        
         colors = [(255, 0, 0), (255, 128, 128)]
         x = b_x+3  # constant
         first_pos = b_y+24  # about mid of first square
         d = 22  # dist between boxes, 19+3
         #battlelist = img.screengrab_array(self.hwnd,self.s_BattleList.region)
+        #img.visualize(battlelist)
         if self.vocation == "knight":
             b_y2 = first_pos+d
+
         for y in range(first_pos, b_y2, d):
             #cv2.line(battlelist, (3,y-b_y), (3,y-b_y+5), (255,255,255), 1) 
             color = img.GetPixelRGBColor(self.hwnd,(x, y))
@@ -832,7 +845,7 @@ class Bot:
                 #if (vocation == "knight" and y != first_pos):
                 #    return False
                 return True
-        #img.visualize(battlelist)
+        #
         return False
     def monsterCount(self):
         count = 0
@@ -858,19 +871,50 @@ class Bot:
         lista = ['haste', 'pz', 'hungry', 'magicshield']
         area = self.s_Buffs.region
         os.chdir(self.base_directory)
-        self.buffs = img.imageListExist(self.hwnd,lista, 'buffs', area, 0.95)
-    
+        self.buffs = img.imageListExist(self.hwnd,lista, 'buffs', area, 0.90)
+        
+    def debug_clickAttack_scanlines(self):
+        _x, _y, _x2, _y2 = self.s_BattleList.region
+        x = _x + 25
+        first_pos = _y + 30
+        d = 22
+
+        img_array = img.screengrab_array(self.hwnd, self.s_BattleList.region)
+
+        # --- Ensure correct format ---
+        img_array = np.array(img_array).copy()
+        img_array = img_array.astype(np.uint8)
+        if len(img_array.shape) == 2:
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_GRAY2BGR)
+        elif img_array.shape[2] == 4:
+            img_array = cv2.cvtColor(img_array, cv2.COLOR_BGRA2BGR)
+
+        # --- Draw scan lines ---
+        for y in range(first_pos, _y2, d):
+            y_line = y - _y
+            cv2.line(img_array, (0, y_line), (img_array.shape[1]-1, y_line), (0,0,255), 1)
+            x_rel = x - _x
+            cv2.circle(img_array, (x_rel, y_line), 3, (255,0,0), -1)
+
+        cv2.imshow('BattleList Scanlines', img_array)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
     def clickAttack(self):
+        #self.debug_clickAttack_scanlines()
         _x, _y, _x2,_y2 = self.s_BattleList.region
         # x 3 y 22
         #found = lookForColor([(255,0,0),(255,128,128)],(x,y,w-150,h))
-        x = _x+25#x = _x+12  # constant
+        x = _x+25#x = _x+12  # constantd
         first_pos = _y+30  # about mid of first square
         d = 22  # dist between boxes, 19+3
+
         if not self.isAttacking() and not self.buffs['pz']:
             for y in range(first_pos, _y2, d):
-                    color = img.GetPixelRGBColor(self.hwnd,(x, y))
+                    color= img.GetPixelRGBColor(self.hwnd,(x, y))
+                    #print("pos: "+str((x,y)) + " color: "+str(color))
                     if (color == (0,0,0)):
+                        print("clicking attack at: "+str((x,y)))
                         click(self.hwnd,x, y)
                         #time.sleep(0.001)
                         return
@@ -1000,9 +1044,8 @@ class Bot:
     #@timeit
     def updateMonsterPositionsNew(self, test=False):
         contour_list = self.getMonstersAroundContours(9, False, False)
-
         if test:
-            opening = img.screengrab_array(self.hwnd, self.s_GameScreen.region)
+            opening = img.screengrab_array(self.hwnd, self.s_GameScreen.region, False)
 
         monster_positions = []
         offset_x = int(self.s_GameScreen.tile_h / 4)  # Offset because names are offset from tile
@@ -1184,7 +1227,8 @@ class Bot:
         
         if (timeInMillis() - cur_sleep > (100+self.normal_delay)):
             
-            self.monsters_around = self.getMonstersAround(self.areaspell_area,False,False)
+            self.monsters_around = self.getMonstersAround(self.areaspell_area,True,True)
+            
             self.monster_count = self.monsterCount()
             #print(monsters_around)
             
@@ -1192,8 +1236,9 @@ class Bot:
                 self.monster_queue.pop()
                 self.monster_queue.appendleft(self.monsters_around)
                 self.monster_queue_time = time.time()
-            
+            print("monsters around: "+str(self.monsters_around))
             if self.monsters_around > 0:
+                
                 if self.res.get(): #and self.shouldRes()
                     self.castExetaRes()
                 if self.amp_res.get():
@@ -1754,11 +1799,12 @@ if __name__ == "__main__":
                 bot.lootAround(True)
         times[1] = timeInMillis()
         if bot.monsterCount() > 0:
+            #print("monster count: "+str(bot.monsterCount()))
             bot.updateMonsterPositions()
-            bot.updateMonsterPositionsNew()
+            #bot.updateMonsterPositionsNew()
         times[2] = timeInMillis()
         #bot.getMonstersAround(bot.areaspell_area,False,False)
-        #if len(bot.party.keys()) > 0:
+        #if len(bot.party.keys()) > 0:w
             #bot.updatePartyPositions()
         
         if bot.hp_heal.get():
