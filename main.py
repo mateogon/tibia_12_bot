@@ -111,7 +111,7 @@ class Bot:
         self.mp_heal = True
         
         self.use_haste = True
-        self.use_food = True
+        self.use_food = False
         
         self.manage_equipment = False
         self.use_ring = False
@@ -125,10 +125,10 @@ class Bot:
         self.player_list = {}
         self.player_list["Mateogon"] = {"vocation" :"sorcerer", "spell_area" : 6}
         self.player_list["Mateo Gon"] = {"vocation" :"knight", "spell_area" : 3}
-        self.player_list["Master Liqui"] = {"vocation" :"druid", "spell_area" : 3}
+        self.player_list["Master Liqui"] = {"vocation" :"knight", "spell_area" : 3}
         self.player_list["Thyrion"] = {"vocation" :"paladin", "spell_area" : 5}
         self.player_list["Zane"] = {"vocation" :"sorcerer", "spell_area" : 3}
-        self.player_list["Helios"] = {"vocation" :"druid", "spell_area" : 6}
+        self.player_list["Helios"] = {"vocation" :"paladin", "spell_area" : 6}
         self.player_list["Kaz"] = {"vocation" :"druid", "spell_area" : 6}
         self.party_leader = "Mateogon"
         self.vocation = self.player_list[self.character_name]["vocation"]
@@ -167,11 +167,12 @@ class Bot:
         #self.areaspell1_hotkey = 'F5'
         self.areaspell_area = self.player_list[self.character_name]["spell_area"]
         #self.areaspell2_hotkey = 'F6'
-        self.min_monsters_around_spell = 3
+        self.min_monsters_around_spell = 1
         self.area_spells_hotkeys = ['F5','F6','F7']
         self.area_spells_slots = [4,5,6]
         self.target_spells_hotkeys = ['F8','F9']
         self.target_spells_slots = [7,8]
+        self.check_spell_cooldowns = False
         self.utito_slot = 16
         self.utito_time = 0
         self.use_utito = True
@@ -191,7 +192,7 @@ class Bot:
         self.haste_hotkey = 'F12'
         self.haste_slot = 11
         self.eat_hotkey = '+'
-        self.food_slot = 12
+        self.food_slot = 13
         self.sio_slot = 14
         self.magic_shield_slot = 16
         self.cancel_magic_shield_slot = 32
@@ -213,7 +214,7 @@ class Bot:
         self.lure = False
         self.last_walk_time = timeInMillis()
         self.last_lure_click_time = timeInMillis()
-        self.kill_amount = 4
+        self.kill_amount = 777
         self.kill_stop_amount = 1
         self.kill_stop_time = 120
         self.lure_amount = 2
@@ -370,7 +371,7 @@ class Bot:
     def updateChatStatusButtonRegion(self):
         #region = (self.width-300, self.height-30, self.width-100, self.height)
         region = (self.width-500, self.height-300, self.width, self.height)
-        button = img.locateImage(self.hwnd,'hud/chat_enabled_button.png', region, 0.96,True)
+        button = img.locateImage(self.hwnd,'hud/chat_enabled_button.png', region, 0.96,False)
         if (button):
             x, y, b_w, b_h = button
             x = x+region[0]-self.left
@@ -963,7 +964,7 @@ class Bot:
         area = self.s_Buffs.region
         os.chdir(self.base_directory)
         self.buffs = img.imageListExist(self.hwnd,lista, 'buffs', area, 0.90)
-        
+
     def debug_clickAttack_scanlines(self):
         _x, _y, _x2, _y2 = self.s_BattleList.region
         x = _x + 25
@@ -992,23 +993,53 @@ class Bot:
         cv2.destroyAllWindows()
 
     def clickAttack(self):
-        #self.debug_clickAttack_scanlines()
-        _x, _y, _x2,_y2 = self.s_BattleList.region
-        # x 3 y 22
-        #found = lookForColor([(255,0,0),(255,128,128)],(x,y,w-150,h))
-        x = _x+25#x = _x+12  # constantd
-        first_pos = _y+30  # about mid of first square
-        d = 22  # dist between boxes, 19+3
+        """
+        Scans the Battle List for a valid target (Black Pixel check).
+        Optimized to use a single screenshot + NumPy array lookup.
+        """
+        # 1. Checks: Don't attack if already attacking or in PZ
+        if self.isAttacking() or self.buffs.get('pz', False):
+            return
 
-        if not self.isAttacking() and not self.buffs['pz']:
-            for y in range(first_pos, _y2, d):
-                    color= img.GetPixelRGBColor(self.hwnd,(x, y))
-                    #print("pos: "+str((x,y)) + " color: "+str(color))
-                    if (color == (0,0,0)):
-                        print("clicking attack at: "+str((x,y)))
-                        click(self.hwnd,x, y)
-                        #time.sleep(0.001)
-                        return
+        # 2. Capture the Battle List region
+        region = self.s_BattleList.region
+        image = img.screengrab_array(self.hwnd, region)
+        
+        if image is None:
+            return
+
+        height, width, _ = image.shape
+
+        # 3. Define Offsets (based on your original code)
+        # Original: x = _x + 25, first_pos = _y + 30, d = 22
+        rel_x = 25
+        start_y = 30
+        step_y = 22
+
+        # 4. Iterate through the slots using the image array
+        for rel_y in range(start_y, height, step_y):
+            
+            # Safety bound check
+            if rel_y >= height or rel_x >= width:
+                break
+
+            # Get the pixel color from the array (Instant)
+            # OpenCV images are BGR. Black is [0, 0, 0] in both.
+            pixel = image[rel_y, rel_x]
+
+            # Check if pixel is pure black [0, 0, 0]
+            # We use np.array_equal or simple comparisons for speed
+            if pixel[0] == 0 and pixel[1] == 0 and pixel[2] == 0:
+                
+                # Calculate Absolute Screen Coordinates for the click
+                abs_x = region[0] + rel_x
+                abs_y = region[1] + rel_y
+                
+                print(f"clicking attack at: {(abs_x, abs_y)}")
+                click(self.hwnd, abs_x, abs_y)
+                
+                # Stop after clicking the first valid target
+                return
     def stopAttacking(self):
         b_x, b_y,_,b_y2 = self.s_BattleList.region
         #w, h = self.s_BattleList.getWidth(),self.s_BattleList.getHeight()
@@ -1340,10 +1371,13 @@ class Bot:
                 times[4] = timeInMillis()
                 if (self.kill and self.cavebot.get()) or self.monsters_around >= self.min_monsters_around_spell.get() :#or self.checkMonsterQueue():
                     for i in range(0,len(self.area_spells_hotkeys)):
-                        if self.checkActionBarSlotCooldown(self.area_spells_slots[i]):
-                            #print("casting area spell")
+                        if self.check_spell_cooldowns:
+
+                            if self.checkActionBarSlotCooldown(self.area_spells_slots[i]):
+                                #print("casting area spell")
+                                press(self.hwnd,self.area_spells_hotkeys[i])
+                        else:
                             press(self.hwnd,self.area_spells_hotkeys[i])
-                            
                         #press(self.hwnd,hotkey)
                     '''
                     if self.spell_alternate:
@@ -1358,7 +1392,10 @@ class Bot:
                     #for hotkey in self.:
                      #   press(self.hwnd,hotkey)
                     for i in range(0,len(self.target_spells_hotkeys)):
-                        if self.checkActionBarSlotCooldown(self.target_spells_slots[i]):
+                        if self.check_spell_cooldowns:
+                            if self.checkActionBarSlotCooldown(self.target_spells_slots[i]):
+                                press(self.hwnd,self.target_spells_hotkeys[i])
+                        else:
                             press(self.hwnd,self.target_spells_hotkeys[i])
                     self.updateLastAttackTime()
                     self.newNormalDelay()
@@ -1529,7 +1566,8 @@ class Bot:
             else:
                 index = 0
                 dist, pos, _ = marks[index]  # Unpack 3 values and ignore the third one
-                #print(dist)
+                print("distance to mark: "+str(dist))
+                print("pos mark: "+str(pos))
                 if dist <= 3:
                     #print("reached current mark")
                     self.updatePreviousMarks()
@@ -1567,6 +1605,7 @@ class Bot:
         print("marks: "+str(marks))
         index = 0
         dist, pos, _ = marks[index]
+        print("distance to mark: "+str(dist))
         #print(dist)
         if dist <= 3:
             print("reached current mark")
@@ -1605,18 +1644,15 @@ class Bot:
         result = []
         discarded = []
         
-        # Get the screenshot and ensure it's in the right format for OpenCV
         map_image = img.screengrab_array(self.hwnd, map_region)
         
-        # Make sure map_image is a proper numpy array for OpenCV
         if map_image is not None:
-            # Convert to numpy array if it's not already
             map_image_np = np.array(map_image)
         else:
-            # Create a blank image if screenshot failed
             map_image_np = np.zeros((300, 300, 3), dtype=np.uint8)
         
         positions = img.locateManyImage(self.hwnd, "map_marks/"+self.current_mark+".png", map_region, 0.97)
+        
         if not isinstance(self.previous_marks[self.current_mark], bool):
             previous = img.locateImage(self.hwnd, self.previous_marks[self.current_mark], map_region, 0.99)
         else:
@@ -1625,36 +1661,53 @@ class Bot:
         if positions:
             if len(positions) > 0:
                 for pos in positions:
-                    x, y = pos[0]+int(pos[2])+4, pos[1]+int(pos[2])+3
-                    if self.compareMarkToPrevious((x,y), previous):
-                        dist = distance.euclidean(map_relative_center, (x,y))
-                        result.append((dist, (map_region[0] + x, map_region[1] + y), (x, y)))
+                    w = int(pos[2])
+                    h = int(pos[3])
+                    
+                    # --- 1. VISUALIZATION / DISTANCE POINT (True Center) ---
+                    # We use this for Distance calculation and Visualization lines.
+                    # It represents the geometric center of the mark.
+                    vis_x = int(pos[0] + (w / 2) - img.left)
+                    vis_y = int(pos[1] + (h / 2) - img.top)
+                    
+                    # --- 2. CLICK POINT (Action Anchor) ---
+                    # We use this ONLY for clicking. 
+                    # It represents the clickable bottom-right area of the tile.
+                    click_x = int(pos[0] + w + 3)
+                    click_y = int(pos[1] + h - 1)
+                    
+                    # Absolute coords for clicking
+                    click_abs = (map_region[0] + click_x, map_region[1] + click_y)
+                    # Relative coords for drawing
+                    vis_rel = (vis_x, vis_y)
+                    
+                    # FIX: Calculate DISTANCE to the VISUAL CENTER (vis_x, vis_y)
+                    # NOT the click point. This ensures distance goes to ~0 when standing on it.
+                    if self.compareMarkToPrevious((click_x, click_y), previous):
+                        dist = distance.euclidean(map_relative_center, (vis_x, vis_y))
+                        result.append((dist, click_abs, vis_rel))
                     else:
-                        dist = distance.euclidean(map_relative_center, (x,y))
-                        discarded.append((dist, (map_region[0] + x, map_region[1] + y), (x, y)))
+                        dist = distance.euclidean(map_relative_center, (vis_x, vis_y))
+                        discarded.append((dist, click_abs, vis_rel))
         
         if len(result) == 0:
             result = discarded
         result.sort(reverse=False)
         
-        # Draw lines for visualization with color coding
         try:
-            # Draw previous mark in red if it exists
             if not isinstance(previous, bool):
                 prev_x, prev_y, w, h = previous
-                prev_pos = (prev_x + w + 4, prev_y + h + 3)
-                cv2.line(map_image_np, map_relative_center, prev_pos, (0, 0, 255), 1)  # Red for previous mark
+                prev_center = (int(prev_x + w/2 - img.left), int(prev_y + h/2 - img.top))
+                cv2.line(map_image_np, map_relative_center, prev_center, (0, 0, 255), 1) 
             
-            # Draw best option in green and secondary options in blue
-            for i, (_, _, (x, y)) in enumerate(result):
+            for i, (_, _, vis_point) in enumerate(result):
                 if i == 0:
-                    cv2.line(map_image_np, map_relative_center, (x, y), (0, 255, 0), 2)  # Green for best option (thicker)
+                    cv2.line(map_image_np, map_relative_center, vis_point, (0, 255, 0), 2) 
                 else:
-                    cv2.line(map_image_np, map_relative_center, (x, y), (255, 0, 0), 1)  # Blue for secondary options
+                    cv2.line(map_image_np, map_relative_center, vis_point, (255, 0, 0), 1) 
         except Exception as e:
             print(f"Error drawing lines: {e}")
 
-        # Store the image for the GUI
         try:
             self.current_map_image = map_image_np.copy()
         except Exception as e:
@@ -1662,7 +1715,6 @@ class Bot:
             self.current_map_image = np.zeros((300, 300, 3), dtype=np.uint8)
         
         return result
-    
     def compareMarkToPrevious(self,pos,previous):
         #for prev in previous:
         
