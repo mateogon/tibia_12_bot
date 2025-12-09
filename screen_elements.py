@@ -159,12 +159,174 @@ class GameScreenElement(BaseElement):
         self.search_region_end_function = search_region_end_function
         self.start_offsets = start_offsets
         self.end_offsets = end_offsets
-        self.areas = {3: False, 4:False,5:False,6:False,7:False,8:False,9:False} # 3x3, 4x4, 5x5, 6x6 tile areas around center tile(player)
+        self.areas = {3: False, 4:False,5:False,6:False,7:False,8:False,9:False}
         self.tiles_around_player = []
+        
+        # A place to store our stable check pixels.
+        self.border_check_pixels = []
+
         super().__init__(name,hwnd)
-    
+
+    def _is_color_in_range(self, color):
+        """
+        Helper: Returns True if the color is within the valid Border Dark Grey range.
+        ALL channels (R, G, and B) must be within 15-30.
+        """
+        r, g, b = color
+        min_val, max_val = 15, 30
+        return (min_val <= r <= max_val) and \
+               (min_val <= g <= max_val) and \
+               (min_val <= b <= max_val)
+
+    def _update_border_check_pixels(self, visualize_check=False):
+        """
+        Stores 'Inside' points (Must be Border) and 'Outside' points (Must NOT be Border).
+        """
+        self.border_check_pixels.clear()
+        if not self.detected:
+            return
+
+        x1, y1, x2, y2 = self.region
+        width = x2 - x1
+        height = y2 - y1
+        off = 2 # Offset for outside pixels
+
+        # --- Define Points: (Coordinates, Should_Be_Border_Color) ---
+        
+        # 1. POSITIVE ANCHORS (Must be Grey)
+        self.border_check_pixels.append( ((x1, y1), True) )
+        self.border_check_pixels.append( ((x1 + int(width / 2), y1), True) )
+        self.border_check_pixels.append( ((x1, y1 + int(height / 2)), True) )
+
+        # 2. NEGATIVE ANCHORS (Must NOT be Grey)
+        self.border_check_pixels.append( ((x1 - off, y1), False) ) # Left of corner
+        self.border_check_pixels.append( ((x1, y1 - off), False) ) # Above corner
+
+        print(f"[DEBUG] Stored {len(self.border_check_pixels)} check points.")
+
+        # --- VISUALIZATION LOGIC (FIXED) ---
+        if visualize_check and self.detected:
+            # We must capture the screenshot here to pass it to the debug function
+            padding = 5
+            c_left = x1 - padding
+            c_top = y1 - padding
+            c_right = x2 + padding
+            c_bottom = y2 + padding
+            
+            screenshot = img.screengrab_array(self.hwnd, (c_left, c_top, c_right, c_bottom))
+            
+            if screenshot is not None:
+                self.show_border_debug(screenshot, c_left, c_top)
+
+    def show_border_debug(self, screenshot, x_offset, y_offset):
+        """
+        Visualizes the data strictly from the screenshot used for logic.
+        """
+        if screenshot is None: return
+
+        # Create mask: White = Border Color, Black = Background
+        lower_bound = np.array([15, 15, 15]) 
+        upper_bound = np.array([30, 30, 30])
+        mask = cv2.inRange(screenshot, lower_bound, upper_bound)
+        debug_view = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+
+        for coords, should_be_border in self.border_check_pixels:
+            # Convert absolute coord to relative image coord
+            rel_x = coords[0] - x_offset
+            rel_y = coords[1] - y_offset
+            
+            # Safety check to ensure we draw inside bounds
+            if 0 <= rel_x < debug_view.shape[1] and 0 <= rel_y < debug_view.shape[0]:
+                color = (0, 255, 0) if should_be_border else (0, 0, 255)
+                cv2.circle(debug_view, (rel_x, rel_y), 2, color, -1)
+
+        cv2.imshow("Border Integrity Check", debug_view)
+        cv2.waitKey(1)
+
+    def has_been_resized(self):
+        """
+        Checks border integrity using a fresh screenshot to match the visualization 1:1.
+        """
+        if not self.border_check_pixels:
+            return True
+
+        # 1. Define capture area. We pad slightly to catch the 'Outside' points.
+        padding = 5
+        x1, y1, x2, y2 = self.region
+        
+        # Calculate the region to grab (Absolute coordinates relative to window)
+        capture_left = x1 - padding
+        capture_top = y1 - padding
+        capture_right = x2 + padding
+        capture_bottom = y2 + padding
+        
+        # 2. Grab the image ONCE. This is what the bot effectively 'sees'.
+        screenshot = img.screengrab_array(self.hwnd, (capture_left, capture_top, capture_right, capture_bottom))
+        
+        if screenshot is None:
+            return False # Can't check, assume fine or handle error
+
+        # 3. Visualize EXACTLY this data
+        #self.show_border_debug(screenshot, capture_left, capture_top)
+
+        import time
+        if not hasattr(self, '_last_resize_debug_time'):
+            self._last_resize_debug_time = 0
+        
+        # 4. Check the pixels in the NumPy array (much faster than GetPixel calls)
+        # Note: screenshot is [row, col] -> [y, x]
+        for coords, should_be_border in self.border_check_pixels:
+            # Convert absolute coords to relative array indices
+            img_y = coords[1] - capture_top
+            img_x = coords[0] - capture_left
+            
+            # Boundary check
+            if not (0 <= img_y < screenshot.shape[0] and 0 <= img_x < screenshot.shape[1]):
+                continue
+
+            # Get pixel color (OpenCV is BGR)
+            b, g, r = screenshot[img_y, img_x]
+            
+            min_val, max_val = 15, 30
+            is_border_color = (min_val <= r <= max_val) and \
+                              (min_val <= g <= max_val) and \
+                              (min_val <= b <= max_val)
+            
+            # Logic Check
+            if should_be_border and not is_border_color:
+                if (time.time() - self._last_resize_debug_time) > 2.0:
+                    print(f"[RESIZE] Point {coords} LOST border. Got (R:{r},G:{g},B:{b})")
+                    self._last_resize_debug_time = time.time()
+                return True
+
+            if not should_be_border and is_border_color:
+                if (time.time() - self._last_resize_debug_time) > 2.0:
+                    print(f"[RESIZE] Point {coords} GAINED border. Got (R:{r},G:{g},B:{b})")
+                    self._last_resize_debug_time = time.time()
+                return True
+
+        return False
+    def force_window_refresh(self):
+        """
+        Force the window to redraw, helping sync the system copy with live version.
+        """
+        import win32con
+        import time
+        try:
+            # Send a paint message to force redraw
+            win32gui.SendMessage(self.hwnd, win32con.WM_PAINT, 0, 0)
+            # Small delay to allow processing
+            time.sleep(0.01)
+            
+            # Alternative: Invalidate a small rect to trigger refresh
+            rect = win32gui.GetWindowRect(self.hwnd)
+            win32gui.InvalidateRect(self.hwnd, (0, 0, 10, 10), True)
+            time.sleep(0.01)
+        except:
+            pass  # If it fails, continue without forcing refresh
 
     def update(self):
+        visualize_resize_check = False
         game_w, game_h = self.getGameDimensions()
         region_start = self.search_region_start_function(game_w, game_h)
         region_end = self.search_region_end_function(game_w, game_h)
@@ -172,6 +334,7 @@ class GameScreenElement(BaseElement):
         found_end = img.locateImage(self.hwnd, self.folder+self.search_image_end, region_end, 0.96)
         if not found_start or not found_end:
             self.detected = False
+            self.border_check_pixels.clear()
             print("couldn't find GameScreen start or end")
             return False
 
@@ -182,33 +345,39 @@ class GameScreenElement(BaseElement):
         x2 += region_end[0] - self.LEFT
         y2 += region_end[1] - self.TOP - 26
 
-        print(f"[DEBUG] Candidate area (x1,y1,x2,y2): ({x1},{y1},{x2},{y2+height})")
-
-        # Take a large enough crop to include the game screen fully
         candidate_area = (x1, y1, x2, y2+height)
         screenshot = img.screengrab_array(self.hwnd, candidate_area)
 
-        # Pass visualize=True to show the result
-        left, top, right, bottom = find_bounding_box_black_border(
-            screenshot, color_min=(14,14,14), color_max=(24,24,24), visualize=False
-        )
+        try:
+            left, top, right, bottom = find_bounding_box_black_border(
+                screenshot, color_min=(14,14,14), color_max=(24,24,24), visualize=False
+            )
+        except IndexError:
+            print("[ERROR] Failed to find bounding box border in candidate area.")
+            self.detected = False
+            self.border_check_pixels.clear()
+            return False
 
-        # Convert relative to absolute screen coords
         abs_left = x1 + left
         abs_top = y1 + top
         abs_right = x1 + right
         abs_bottom = y1 + bottom
 
-        print(f"[DEBUG] Absolute detected region: ({abs_left}, {abs_top}, {abs_right}, {abs_bottom})")
-        print(f"[DEBUG] Absolute region size: width={abs_right-abs_left}, height={abs_bottom-abs_top}")
-
         self.region = (abs_left, abs_top, abs_right, abs_bottom)
         self.tile_h = self.getHeight() / self.tiles_y
         self.tile_w = self.getWidth() / self.tiles_x
         self.detected = True
+        
+        # --- Re-including the previously omitted methods ---
         self.updateAreas()
         self.updateTilesAroundPlayer()
+        
+        # After a successful update, store the new ground truth.
+        self._update_border_check_pixels(visualize_check=visualize_resize_check)
+        
         return True
+
+    # --- ALL ORIGINAL HELPER METHODS ARE NOW INCLUDED ---
 
     def updateAreas(self):
         center_tile = (7,5)
@@ -222,7 +391,7 @@ class GameScreenElement(BaseElement):
                 self.areas[i+2]=r
             else:
                 self.areas[i+2] = self.region
-            #image = img.screengrab_array(self.hwnd,r,True)
+
     def updateTilesAroundPlayer(self):
         region = self.getAreaAroundPlayer(3)
         tile_h = self.tile_h
@@ -232,17 +401,20 @@ class GameScreenElement(BaseElement):
             self.tiles_around_player.append([])
             for y in range(0,3):
                 self.tiles_around_player[x].append((region[0]+int(x*tile_w+int(tile_w/2)),region[1]+int(y*tile_h+int(tile_h/2))))
+    
     def getNamesArea(self,area):
         r = self.areas[area]
-        offset_x = int(self.tile_h/3) #offset because names are offset from tile
+        offset_x = int(self.tile_h/3)
         offset_y = offset_x*2
         r = (r[0],r[1]-offset_x,r[2],r[3]-offset_y)
         return r
+    
     def getTileDimensions(self):
         return (self.tile_w, self.tile_h)
+    
     def getAreaAroundPlayer(self,area):
-        
         return self.areas[area]
+    
 class ScreenElement(BaseElement):
     def __init__(self, name,hwnd,search_image,search_region_function = lambda w,h: (0,0,0,0),x_offset = 0,y_offset = 0,elem_width = 0, elem_height = 0):
         self.x_offset = x_offset

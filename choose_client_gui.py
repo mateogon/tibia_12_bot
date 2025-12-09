@@ -29,7 +29,7 @@ def botEnumHandler(hwnd, lParam):
         pass
 def enumHandler(hwnd, lParam):
     title = win32gui.GetWindowText(hwnd)
-    if win32gui.GetClassName(hwnd) == "Qt5158QWindowOwnDCIcon" or win32gui.GetClassName(hwnd) == "Qt673QWindowIcon" or win32gui.GetClassName(hwnd)== "Qt673QWindowOwnDCIcon" and "Tibia" in title and str(hwnd) not in bots:
+    if win32gui.GetClassName(hwnd) == "Qt5158QWindowOwnDCIcon" or win32gui.GetClassName(hwnd) == "Qt673QWindowIcon" or win32gui.GetClassName(hwnd)== "Qt673QWindowOwnDCIcon" or win32gui.GetClassName(hwnd)== "Qt683QWindowIcon" and "Tibia" in title and str(hwnd) not in bots:
         clients[hwnd] = title
 win32gui.EnumWindows(botEnumHandler, None)
 win32gui.EnumWindows(enumHandler, None)

@@ -6,7 +6,8 @@ import pytesseract
 import cv2
 import imutils
 import numpy as np
-
+import tkinter as tk
+from tkinter import messagebox
 import PIL
 import os
 import keyboard as kb
@@ -94,7 +95,7 @@ class Bot:
         self.RelativeScreenElements = [self.s_Map,self.s_Bless,self.s_Buffs,self.s_Health,self.s_Mana,self.s_Capacity,self.s_WindowButtons]
         #element order is important
         self.ElementsLists = [self.ScreenElements,self.BoundScreenElements,self.RelativeScreenElements,self.ScreenWindows,]
-        
+        self.action_bar_anchor_pos = None # Will store the stable (x, y) of the action bar's start image.
         # endregion
         
         #GUI variables
@@ -122,9 +123,9 @@ class Bot:
         self.mppc = 100
         
         self.player_list = {}
-        self.player_list["Mateogon"] = {"vocation" :"knight", "spell_area" : 3}
+        self.player_list["Mateogon"] = {"vocation" :"sorcerer", "spell_area" : 6}
         self.player_list["Mateo Gon"] = {"vocation" :"knight", "spell_area" : 3}
-        self.player_list["Master Liqui"] = {"vocation" :"knight", "spell_area" : 3}
+        self.player_list["Master Liqui"] = {"vocation" :"druid", "spell_area" : 3}
         self.player_list["Thyrion"] = {"vocation" :"paladin", "spell_area" : 5}
         self.player_list["Zane"] = {"vocation" :"sorcerer", "spell_area" : 3}
         self.player_list["Helios"] = {"vocation" :"druid", "spell_area" : 6}
@@ -239,8 +240,7 @@ class Bot:
         self.current_map_image = None
         #GUI
         self.GUI = ModernBotGUI(self, self.character_name, self.vocation)
-
-        
+    
     def updateWindowCoordinates(self):
         maximizeWindow(self.hwnd)
         l, t, r, b = win32gui.GetWindowRect(self.hwnd)
@@ -252,8 +252,8 @@ class Bot:
             self.updateAllElements()
             self.getPartyList()
         else:
-            if self.checkActionbarMoved(): #self.checkGameScreenMoved():
-                print("actionbar moved, updating screen elements")
+            if self.s_GameScreen.has_been_resized():
+                print("Game view has been resized. Updating bound elements...")
                 self.updateBoundElements()
                 
                 
@@ -317,31 +317,41 @@ class Bot:
                             break      
                         
     def updateBoundElements(self):
+        # The original logic still needs to run for other parts of the bot.
         for elem in self.BoundScreenElements:
             elem.update()
-            
     def checkActionbarMoved(self):
-        if self.s_ActionBar.detected:
-            #(117, 117, 117) at (-14,81) and (-13,81)
-            #(120, 120, 120) at (-12,81)
-            x,y,_,_ = self.s_ActionBar.region
-            dx = -15
-            dy = 75
-            #dx = -14
-            #dy = 82
-            #x += dx
-            #y += dy
-            #colors = {(117, 117, 117) : [] ,(120, 120, 120) : []}
-            #print("original:")
-            #print((x,y))
-            #print(img.GetPixelRGBColor(self.hwnd, (x,y)))
-            #img.lookForColor(self.hwnd, (117,117,117) ,(x-5,y-5,x+5,y+5), 1, 1,True)
-            pixel_color = img.GetPixelRGBColor(self.hwnd, (x,y))
-            if pixel_color !=  (114, 115, 115):#(117,117,117):
-                print(pixel_color)
-                return True
+        """
+        Performs a hyper-efficient and accurate check using a single, stable anchor point.
+        This function performs NO image searching.
+        """
+        # If our stable anchor hasn't been set yet, we can't check.
+        # This forces an update on the first run to establish the anchor.
+        if self.action_bar_anchor_pos is None:
+            print("Action bar anchor not established. Forcing update.")
+            return True
+
+        # These values are from our successful Anchored Calibration.
+        stable_pixel_color = (40, 25, 12)
+        dx = 6
+        dy = 31
+
+        # Use the STABLE anchor position, not the jittery s_ActionBar.region
+        anchor_x, anchor_y = self.action_bar_anchor_pos
+        
+        check_x = anchor_x + dx
+        check_y = anchor_y + dy
+
+        # Perform the single, instantaneous pixel color check.
+        current_pixel_color = img.GetPixelRGBColor(self.hwnd, (check_x, check_y))
+        
+        # If the color does not match, the bar has definitely moved.
+        if current_pixel_color != stable_pixel_color:
+            print(f'Action bar moved. At ({check_x},{check_y}) expected {stable_pixel_color}, got {current_pixel_color}. Triggering update.')
+            return True # It moved!
+                
+        # The pixel is correct, the bar has not moved.
         return False
-    
     def checkGameScreenMoved(self, color_min=(14,14,14), color_max=(28,28,28)):
         """
         Checks if the bottom-left pixel of the current gamescreen region is still within the border color range.
@@ -390,13 +400,24 @@ class Bot:
         y = self.s_ActionBar.region[1]
         x = self.s_ActionBar.region[0]+(box_width*(pos))+2*pos
         return (x,y)
-    def clickActionbarSlot(self,pos):
-        x,y = self.getActionbarSlotPosition(pos)
-        print("clicking actionbar slot: "+str(pos) + " at: "+str((x,y)))
-        click(self.hwnd,x,y)
+    
+    def clickActionbarSlot(self, pos, check_cooldown=True):
+        # 1. Defensive Cooldown Check
+        if check_cooldown:
+            # We use the optimized NumPy check we just wrote
+            if not self.checkActionBarSlotCooldown(pos):
+                # print(f"[DEBUG] Slot {pos} is on cooldown. Skipping click.")
+                return False
+
+        # 2. Perform the click
+        x, y = self.getActionbarSlotPosition(pos)
+        click(self.hwnd, x, y)
+        return True
+    
     def updateActionbarSlotStatus(self):
         for i in range(0,30):
             self.slot_status[i] = self.isActionbarSlotSet(i)
+    
     def isActionbarSlotSet(self,i):
         x,y = self.getActionbarSlotPosition(i)
         #img.screengrab_array(self.hwnd,(x,y,x+34,y+34),True)
@@ -420,23 +441,38 @@ class Bot:
             print(color)
             return False
     
-    def checkActionBarSlotCooldown(self,pos):
+    def checkActionBarSlotCooldown(self, pos):
+        x, y = self.getActionbarSlotPosition(pos)
+        x2, y2 = x + 34, y + 34
+        
+        # Center region where white text appears
+        region = (x + 15, y + 18, x2 - 15, y2 - 12)
+        
+        image = img.screengrab_array(self.hwnd, region)
+        if image is None: return False 
 
-        x,y = self.getActionbarSlotPosition(pos)
-        x2,y2 = x+34,y+34
-        #full slot
-        #image = img.screengrab_array(self.hwnd,(x,y,x2,y2),True)
-        #center region to check cooldown time
-        #image = img.screengrab_array(self.hwnd,(x+15,y+18,x2-15,y2-12))
-        #comp = np.all(image == (223, 223, 223), axis=-1) 
-        val = img.lookForColor(self.hwnd,(223,223,223),(x+15,y+18,x2-15,y2-12),1,1)
-
-        return not val
-        #if (np.count_nonzero(comp) > 0):
-            #print("pos "+str(pos) + " IS on cooldown")
-            #return False
-        #print("pos "+str(pos) + " is NOT on cooldown")
-        #return True
+        # Check for (223, 223, 223) - Cooldown Text Color
+        target = np.array([223, 223, 223])
+        mask = np.all(image == target, axis=2)
+        
+        # If pixels found -> Cooldown detected -> Return False (Not Ready)
+        return not np.any(mask)
+    
+    def debug_cooldown_check(self):
+        """
+        Standalone debug function to constantly monitor specific slots.
+        """
+        # List the slots you want to test (e.g., 5 is usually a strong strike)
+        slots_to_test = [8,9] 
+        
+        for slot in slots_to_test:
+            # We call the optimized check function
+            is_ready = self.checkActionBarSlotCooldown(slot)
+            
+            status = "READY" if is_ready else "COOLDOWN"
+            
+            # Print distinct message
+            print(f"[DEBUG MONITOR] Slot {slot} is {status}")
     def getGameRegionSquares(self):
         gr_w, gr_h = self.s_GameScreen.getWidth(),self.s_GameScreen.getHeight()
         sqr_w = int(gr_w/15)#int(gr_w/30)#
@@ -674,38 +710,66 @@ class Bot:
         ret, thresh = cv2.threshold(dist_transform,mod*dist_transform.max(),255,0)
         thresh = np.uint8(thresh)
         return thresh
+    
     def getHealth(self):
-        cant = 0
-        region = self.s_Health.region
-        y = region[1]+6
-        bar_width = self.s_Health.getWidth()
-        delta = 4
-        #counts gray pixels in a line of hp region
-        for x in range(region[0], region[2], delta):
-            color = img.GetPixelRGBColor(self.hwnd,(x, y))
-            dist = img.ColorDistance(color, (95, 95, 95))
-            if (dist <= 15):
-                cant += 1
-        cant *= delta
-        self.hppc = 100 * (bar_width-cant)/bar_width
-        #return hppc
+        """
+        Calculates Health % by analyzing a single row of pixels from a screenshot.
+        Optimized for speed using NumPy.
+        """
+        image = img.screengrab_array(self.hwnd, self.s_Health.region)
+        if image is None: 
+            return
+
+        # Scan line Y=6. This is the standard offset for the empty grey bar.
+        scan_y = 6
+        height, width, _ = image.shape
+        
+        if scan_y >= height:
+            return
+
+        # Extract the specific row. OpenCV images are BGR.
+        # Target Grey (95, 95, 95) is the same in BGR.
+        row_pixels = image[scan_y, :] 
+        target_color = np.array([95, 95, 95])
+        
+        # Calculate Euclidean distance for the whole row at once
+        distances = np.linalg.norm(row_pixels - target_color, axis=1)
+        
+        # Count pixels that are close to the "Empty Grey" color (dist <= 15)
+        empty_pixels_count = np.sum(distances <= 15)
+        
+        # Calculate HP Percentage
+        self.hppc = 100 * (width - empty_pixels_count) / width
+    
     def getMana(self):
-        cant = 0
-        region = self.s_Health.region
-        region = self.s_Mana.region
-        y = region[1]+6
-        bar_width = self.s_Mana.getWidth()
-        delta = 4
-        cant = 0
-        #counts gray pixels in a line of mp region
-        for x in range(region[0], region[2], delta):
-            color = img.GetPixelRGBColor(self.hwnd,(x, y))
-            dist = img.ColorDistance(color, (95, 95, 95))
-            if (dist <= 15):
-                cant += 1
-        cant *= delta
-        self.mppc = 100 * (bar_width-cant)/bar_width
-        #return mppc
+        """
+        Calculates Mana % by analyzing a single row of pixels from a screenshot.
+        Optimized for speed using NumPy.
+        """
+        image = img.screengrab_array(self.hwnd, self.s_Mana.region)
+        if image is None: 
+            return
+
+        # Scan line Y=6. This is the standard offset for the empty grey bar.
+        scan_y = 6
+        height, width, _ = image.shape
+        
+        if scan_y >= height:
+            return
+
+        # Extract the specific row. OpenCV images are BGR.
+        # Target Grey (95, 95, 95) is the same in BGR.
+        row_pixels = image[scan_y, :] 
+        target_color = np.array([95, 95, 95])
+        
+        # Calculate Euclidean distance for the whole row at once
+        distances = np.linalg.norm(row_pixels - target_color, axis=1)
+        
+        # Count pixels that are close to the "Empty Grey" color (dist <= 15)
+        empty_pixels_count = np.sum(distances <= 15)
+        
+        # Calculate MP Percentage
+        self.mppc = 100 * (width - empty_pixels_count) / width
     def getBurstDamage(self):
         current = self.hp_queue[0]
         val = []
@@ -747,15 +811,18 @@ class Bot:
         if (self.mppc <= thresh and self.hppc >= self.hp_thresh_low.get()):
             press(self.hwnd,self.mana_hotkey)
     def castExetaRes(self):
-        if time.time() - self.exeta_res_time > self.exeta_res_cast_time and self.checkActionBarSlotCooldown(self.exeta_res_slot):
-            self.exeta_res_time = time.time()
-            self.clickActionbarSlot(self.exeta_res_slot)
+        # Check time interval first
+        if time.time() - self.exeta_res_time > self.exeta_res_cast_time:
+            # Try to click. The function now checks visual cooldown internally.
+            if self.clickActionbarSlot(self.exeta_res_slot):
+                # Only update timer if click succeeded (was off cooldown)
+                self.exeta_res_time = time.time()
+
     def castAmpRes(self):
-        if time.time() - self.amp_res_time > self.amp_res_cast_time and self.checkActionBarSlotCooldown(self.amp_res_slot):
-            
-            self.amp_res_time = time.time()
-            
-            self.clickActionbarSlot(self.amp_res_slot)
+        if time.time() - self.amp_res_time > self.amp_res_cast_time:
+            if self.clickActionbarSlot(self.amp_res_slot):
+                self.amp_res_time = time.time()
+
     def haste(self):
         if self.slot_status[self.haste_slot]:
             if not self.buffs['haste'] and not self.buffs['pz']:
@@ -764,8 +831,9 @@ class Bot:
     def eat(self):
         if self.slot_status[self.food_slot]:
             if not self.buffs['pz'] and self.buffs['hungry']:
-                
-                self.clickActionbarSlot(self.food_slot)
+                print("eating")
+                # Skip cooldown check for food
+                self.clickActionbarSlot(self.food_slot, check_cooldown=False)
     
     def shouldUtito(self,monster_count):
         b_x, b_y,_,b_y2 = self.s_BattleList.region
@@ -796,27 +864,25 @@ class Bot:
                 return False
             count+=1
         return True
+    
     def utito(self):
-        
         if time.time() - self.utito_time >= 10:
             monster_count = self.monsterCount()
             if monster_count >= 3:
                 if self.shouldUtito(monster_count):
-                    self.clickActionbarSlot(self.utito_slot)
-                    self.utito_time = time.time()
+                    # Only reset timer if the click actually happened
+                    if self.clickActionbarSlot(self.utito_slot):
+                        self.utito_time = time.time()
+
     def shouldRes(self):
         b_x, b_y,_,b_y2 = self.s_BattleList.region
         #w, h = self.s_BattleList.getWidth(),self.s_BattleList.getHeight()
         # x 3 y 22
         #found = lookForColor([(255,0,0),(255,128,128)],(x,y,w-150,h))
-        
-
         x = b_x+26  # constant
         first_pos = b_y+30  # about mid of first square
         d = 22  # dist between boxes, 19+3
         #battlelist = img.screengrab_array(self.hwnd,self.s_BattleList.region)
-        
-        
         for y in range(first_pos, b_y2, d):
             #cv2.line(battlelist, (26,y), (26,y+5), (0,255,255), 1) 
             color = img.GetPixelRGBColor(self.hwnd,(x, y))
@@ -825,7 +891,7 @@ class Bot:
                 
        
         #img.visualize(battlelist)
-    def isAttacking(self):
+    def isAttackingOld(self):
         b_x, b_y,b_x2,b_y2 = self.s_BattleList.region
         #w, h = self.s_BattleList.getWidth(),self.s_BattleList.getHeight()
         # x 3 y 22
@@ -847,6 +913,31 @@ class Bot:
                 return True
         #
         return False
+    def isAttacking(self):
+        """
+        Efficiently scans a narrow 5px strip on the left of the Battle List.
+        Detects Red (0,0,255) or Highlight Red (128,128,255) pixels.
+        """
+        b_x, b_y, _, b_y2 = self.s_BattleList.region
+        
+        # Optimization: Scan only the first 5 pixels of width. 
+        # The red attack border is usually at offset +2 or +3.
+        scan_width = 5 
+        
+        scan_region = (b_x, b_y, b_x + scan_width, b_y2)
+        image = img.screengrab_array(self.hwnd, scan_region)
+        
+        if image is None: 
+            return False
+
+        # Fast NumPy mask for Red or Highlight Red (BGR format)
+        # Red: (0, 0, 255), Highlight: (128, 128, 255)
+        # We check if Blue channel is 255 AND Green channel is either 0 or 128
+        mask = (image[:, :, 2] == 255) & ((image[:, :, 1] == 0) | (image[:, :, 1] == 128))
+        
+        return np.any(mask)
+    
+    
     def monsterCount(self):
         count = 0
         _x, _y, _x2,_y2 = self.s_BattleList.region
@@ -1236,7 +1327,7 @@ class Bot:
                 self.monster_queue.pop()
                 self.monster_queue.appendleft(self.monsters_around)
                 self.monster_queue_time = time.time()
-            print("monsters around: "+str(self.monsters_around))
+            #print("monsters around: "+str(self.monsters_around))
             if self.monsters_around > 0:
                 
                 if self.res.get(): #and self.shouldRes()
@@ -1268,7 +1359,6 @@ class Bot:
                      #   press(self.hwnd,hotkey)
                     for i in range(0,len(self.target_spells_hotkeys)):
                         if self.checkActionBarSlotCooldown(self.target_spells_slots[i]):
-                            #print("casting area spell")
                             press(self.hwnd,self.target_spells_hotkeys[i])
                     self.updateLastAttackTime()
                     self.newNormalDelay()
@@ -1343,8 +1433,10 @@ class Bot:
             time.sleep(0.05)
             click(self.hwnd,x+20,y+34)
             win32api.SetCursorPos((x_i,y_i))
-        except:
-            print("wrong party leader name")
+        except Exception as e:
+            print("error: "+str(e))
+            #print("leader not found")
+            return False
     def getPartyList(self):
         x, y, x2,y2 = self.s_Party.region
         bar_h = 4
@@ -1401,9 +1493,10 @@ class Bot:
 
     def healParty(self):
         if self.vocation == "druid":
-                hppc = self.getPartyLeaderVitals()
-                if hppc < 80:
-                    self.clickActionbarSlot(self.sio_slot)
+            hppc = self.getPartyLeaderVitals()
+            if hppc < 80:
+                self.clickActionbarSlot(self.sio_slot)
+
     def cavebottest(self):
         marks = self.getClosestMarks()
         monster_count = self.monsterCount()
@@ -1471,9 +1564,9 @@ class Bot:
             #print("no "+self.current_mark+ " mark found, changing to the next one")
             self.nextMark()
             marks = self.getClosestMarks()
-    
+        print("marks: "+str(marks))
         index = 0
-        dist, pos = marks[index]
+        dist, pos, _ = marks[index]
         #print(dist)
         if dist <= 3:
             print("reached current mark")
@@ -1743,11 +1836,11 @@ class Bot:
     
     def test(self):
         print("test")
-        offset, error, ss_color, win_color = img.sync_screenshot_with_pixel(self.hwnd, (100, 100, 300, 300), (10, 10))
-        print("Best offset:", offset)
-        print("Error:", error)
-        print("Screenshot color:", ss_color)
-        print("Window color:", win_color)
+        #offset, error, ss_color, win_color = img.sync_screenshot_with_pixel(self.hwnd, (100, 100, 300, 300), (10, 10))
+        #print("Best offset:", offset)
+        #print("Error:", error)
+        #print("Screenshot color:", ss_color)
+        #print("Window color:", win_color)
 if __name__ == "__main__":
     
     bot = Bot()
@@ -1765,14 +1858,13 @@ if __name__ == "__main__":
     total_time = 0
     times = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
     start_time = time.time()
-    
+    calibrate = False
     while(True): 
         #time.sleep(1)
         bot.GUI.loop()
         bot.updateWindowCoordinates()
         bot.checkAndDetectElements()
         bot.getBuffs()
-        
         #bot.cavebottest()
         #bot.getMonstersAround(6,False,True)
         #print(bot.waypoint_folder.get())
@@ -1790,7 +1882,12 @@ if __name__ == "__main__":
         start = timeInMillis()
         current_time = int(time.time() - start_time)
         times[0] = timeInMillis()
-        
+        if calibrate:
+            bot.calibrate_actionbar_pixel()
+            print("Calibration finished. Please update your code and restart the bot.")
+            exit() # Exit the script after calibration is done
+
+
         #print(current_time % 10)
         if current_time % 10 == 0:
             bot.updateActionbarSlotStatus()
@@ -1824,10 +1921,11 @@ if __name__ == "__main__":
             bot.attackSpells()
         times[6] = timeInMillis()
         if bot.cavebot.get():
-            if bot.vocation == "knight":
-                bot.cavebottest()
-            else:
-                bot.cavebot_distance()
+            bot.cavebottest()
+            #if bot.vocation == "knight":
+            #    bot.cavebottest()
+            #else:
+            #    bot.cavebot_distance()
         times[7] = timeInMillis()
         if bot.use_haste:
             bot.haste()

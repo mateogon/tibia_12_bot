@@ -29,6 +29,9 @@ def tesser_image(im, a, b, c, config):
 def screengrab_array(hwnd,area, show=False):
     im = area_screenshot(hwnd,area,show)
     
+    if im is None:
+        return None
+
     if show:
         visualize(im)
     return(im)
@@ -111,8 +114,12 @@ def listColors(file):
     
 
 def locateImage(hwnd, file, region, thresh, show=False):
-    img_rgb = screengrab_array(hwnd, region,show)
+    img_rgb = screengrab_array(hwnd, region, show)
     
+    if img_rgb is None:
+        print(f"locateImage failed: Screen capture returned None for {file}")
+        return False
+
     if isinstance(file, str):
         template = cv2.imread('img/' + file)
     else:
@@ -120,21 +127,31 @@ def locateImage(hwnd, file, region, thresh, show=False):
 
     height, width, channels = template.shape
     h, w = template.shape[:-1]
-    res = cv2.matchTemplate(img_rgb, template, cv2.TM_CCOEFF_NORMED)
+    
+    try:
+        res = cv2.matchTemplate(img_rgb, template, cv2.TM_CCOEFF_NORMED)
+    except cv2.error:
+        return False
+
     threshold = thresh
     loc = np.where(res >= threshold)
     pos = None  # Initialize pos in case loc is empty
 
+    # FIX: Initialize the visualization image OUTSIDE the loop
+    if show:
+        img_rgb_vis = cv2.cvtColor(img_rgb, cv2.COLOR_BGR2GRAY)
+
     for pt in zip(*loc[::-1]):  # Switch columns and rows
         pos = pt
         if show:
-            # Ensure img_rgb is in the correct format
-            img_rgb = cv2.cvtColor( img_rgb, cv2.COLOR_BGR2GRAY)
-            cv2.rectangle(img_rgb, pt, (pt[0] + w, pt[1] + h), (255, 0, 0), 1)
+            # Draw rectangle on the pre-initialized image
+            cv2.rectangle(img_rgb_vis, pt, (pt[0] + w, pt[1] + h), (255, 0, 0), 1)
 
     try:
-        if show :
-            visualize(img_rgb)
+        if show:
+            # Now this variable is guaranteed to exist if show=True
+            visualize(img_rgb_vis)
+            
         if pos is not None:
             return (pos[0] + left, pos[1] + top, w, h)
         else:
@@ -142,16 +159,24 @@ def locateImage(hwnd, file, region, thresh, show=False):
     except Exception as e:
         print(f"An error occurred: {e}")
         return False
-
 def locateManyImage(hwnd,file, region, thresh, show=False):
     img_rgb = screengrab_array(hwnd,region)
+    
+    if img_rgb is None:
+        return False
+
     if show:
         img_rgb_vis = cv2.cvtColor( img_rgb, cv2.COLOR_BGR2GRAY)
 
     template = cv2.imread('img/'+file)
     height, width, channels = template.shape
     h, w = template.shape[:-1]
-    res = cv2.matchTemplate(img_rgb, template, cv2.TM_CCOEFF_NORMED)
+    
+    try:
+        res = cv2.matchTemplate(img_rgb, template, cv2.TM_CCOEFF_NORMED)
+    except cv2.error:
+        return False
+
     threshold = thresh
     loc = np.where(res >= threshold)
     pos = []
@@ -161,17 +186,22 @@ def locateManyImage(hwnd,file, region, thresh, show=False):
         pt = (pt[0]+left, pt[1]+top, w, h)
         pos.append(pt)
     try:
-        # print(time.time()-start_time)
-        #img = PIL.Image.fromarray(img_rgb).show()
         if show:
             visualize(img_rgb_vis)
         return pos
     except:
         return False
-
+    
 def imageListExist(hwnd,lista, folder, region, thresh):
     d = {}
     img_rgb = screengrab_array(hwnd,region)
+    
+    # If capture failed, assume nothing exists to prevent crash
+    if img_rgb is None:
+        for file in lista:
+            d[file] = False
+        return d
+
     os.chdir(os.getcwd())
     for file in lista:
         template = cv2.imread('img/'+folder+'/' + file + '.png')
@@ -180,13 +210,18 @@ def imageListExist(hwnd,lista, folder, region, thresh):
             continue
         height, width, channels = template.shape
         h, w = template.shape[:-1]
-        res = cv2.matchTemplate(img_rgb, template, cv2.TM_CCOEFF_NORMED)
-        threshold = thresh
-        loc = np.where(res >= threshold)
-        if (len(loc[0])):
-            d[file] = True
-        else:
+        
+        try:
+            res = cv2.matchTemplate(img_rgb, template, cv2.TM_CCOEFF_NORMED)
+            threshold = thresh
+            loc = np.where(res >= threshold)
+            if (len(loc[0])):
+                d[file] = True
+            else:
+                d[file] = False
+        except cv2.error:
             d[file] = False
+            
     return d
 
 def distance(x1, y1, x2, y2):
@@ -198,6 +233,18 @@ def ColorDistance(rgb1, rgb2):
     cr, cg, cb = rgb2
     color_diff = sqrt((r - cr)**2 + (g - cg)**2 + (b - cb)**2)
     return color_diff
+def GetPixelRGBColor22(hwnd, pos):
+    rect = win32gui.GetWindowRect(hwnd)
+    abs_x = rect[0] + pos[0]
+    abs_y = rect[1] + pos[1]
+    hwndDC = win32gui.GetWindowDC(hwnd)
+    try:
+        ret = win32gui.GetPixel(hwndDC, abs_x, abs_y)
+        r, g, b = ret & 0xff, (ret >> 8) & 0xff, (ret >> 16) & 0xff
+    except:
+        r, g, b = 999, 999, 999
+    win32gui.ReleaseDC(hwnd, hwndDC)
+    return (r, g, b)
 
 def GetPixelRGBColor(hwnd,pos):
     rect = win32gui.GetWindowRect(hwnd)
@@ -244,6 +291,7 @@ def lookForColor(hwnd,color, region, dx=3, dy=3,test = False):
 
             pix_color = GetPixelRGBColor(hwnd,(x, y))
             if (pix_color == color):
+                    print(f"Found color {color} at ({x}, {y})")
                     return True
     return False
 
