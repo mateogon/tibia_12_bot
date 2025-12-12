@@ -131,12 +131,6 @@ def find_bounding_box_black_border(
     final_top = min(top, top2)
     final_bottom = max(bottom, bottom2)
 
-    print(f"[DEBUG] Top border at row {top_row}, columns {left}-{right}")
-    print(f"[DEBUG] Bottom border at row {bottom_row}, columns {left2}-{right2}")
-    print(f"[DEBUG] Left border at col {left_col}, rows {top}-{bottom}")
-    print(f"[DEBUG] Right border at col {right_col}, rows {top2}-{bottom2}")
-    print(f"[DEBUG] Final box: left={final_left}, top={final_top}, right={final_right}, bottom={final_bottom}")
-
     if visualize:
         vis_img = screenshot.copy()
         cv2.rectangle(vis_img, (final_left, final_top), (final_right, final_bottom), (0,255,0), 2)
@@ -201,8 +195,6 @@ class GameScreenElement(BaseElement):
         # 2. NEGATIVE ANCHORS (Must NOT be Grey)
         self.border_check_pixels.append( ((x1 - off, y1), False) ) # Left of corner
         self.border_check_pixels.append( ((x1, y1 - off), False) ) # Above corner
-
-        print(f"[DEBUG] Stored {len(self.border_check_pixels)} check points.")
 
         # --- VISUALIZATION LOGIC (FIXED) ---
         if visualize_check and self.detected:
@@ -294,13 +286,13 @@ class GameScreenElement(BaseElement):
             
             # Logic Check
             if should_be_border and not is_border_color:
-                if (time.time() - self._last_resize_debug_time) > 2.0:
+                if (time.time() - self._last_resize_debug_time) > 0.5:
                     print(f"[RESIZE] Point {coords} LOST border. Got (R:{r},G:{g},B:{b})")
                     self._last_resize_debug_time = time.time()
                 return True
 
             if not should_be_border and is_border_color:
-                if (time.time() - self._last_resize_debug_time) > 2.0:
+                if (time.time() - self._last_resize_debug_time) > 0.5:
                     print(f"[RESIZE] Point {coords} GAINED border. Got (R:{r},G:{g},B:{b})")
                     self._last_resize_debug_time = time.time()
                 return True

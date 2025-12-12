@@ -125,12 +125,12 @@ class Bot:
         self.player_list = {}
         self.player_list["Mateogon"] = {"vocation" :"sorcerer", "spell_area" : 6}
         self.player_list["Mateo Gon"] = {"vocation" :"knight", "spell_area" : 3}
-        self.player_list["Master Liqui"] = {"vocation" :"knight", "spell_area" : 3}
+        self.player_list["Master Liqui"] = {"vocation" :"knight", "spell_area" : 6}
         self.player_list["Thyrion"] = {"vocation" :"paladin", "spell_area" : 5}
         self.player_list["Zane"] = {"vocation" :"sorcerer", "spell_area" : 3}
         self.player_list["Helios"] = {"vocation" :"paladin", "spell_area" : 6}
         self.player_list["Kaz"] = {"vocation" :"druid", "spell_area" : 6}
-        self.party_leader = "Mateogon"
+        self.party_leader = "Master Liqui"
         self.vocation = self.player_list[self.character_name]["vocation"]
         self.party = {}
         self.party_positions = []
@@ -241,7 +241,9 @@ class Bot:
         self.current_map_image = None
         #GUI
         self.GUI = ModernBotGUI(self, self.character_name, self.vocation)
-    
+        self.last_follow_time = 0 
+        self.follow_retry_delay = 2.5
+        
     def updateWindowCoordinates(self):
         maximizeWindow(self.hwnd)
         l, t, r, b = win32gui.GetWindowRect(self.hwnd)
@@ -256,7 +258,6 @@ class Bot:
             if self.s_GameScreen.has_been_resized():
                 print("Game view has been resized. Updating bound elements...")
                 self.updateBoundElements()
-                
                 
     def getCharacterName(self):
         title = win32gui.GetWindowText(self.hwnd)
@@ -1420,91 +1421,247 @@ class Bot:
             self.last_equip_time = timeInMillis()
             
     def isFollowing(self):
+        """
+        Checks if the green follow border exists in the Party Window.
+        Colors: Standard Green (0, 255, 0) and Highlight Green (128, 255, 128).
+        """
         b_x, b_y, w, h = self.s_Party.region
-        # x 3 y 22
-        #screengrab_array((b_x, b_y, w, h),True)
+        
+        # Capture the whole party window to find the border
+        image = img.screengrab_array(self.hwnd, (b_x, b_y, w, h))
+        
+        if image is None:
+            return False
 
-        colors = [(0, 255, 0), (128, 255, 128)]
-        first_pos = b_y+24  # about mid of first square
-        d = 22  # dist between boxes, 19+3
-        for y in range(first_pos, h, d):
-            color = img.GetPixelRGBColor(self.hwnd,(b_x, y))
-            if (color in colors):
-                #print("following")
-                return True
-        #print("not following")
-        return False
+        # OpenCV images are BGR.
+        # 00FF00 (RGB) -> (0, 255, 0) (BGR)
+        # 80FF80 (RGB) -> (128, 255, 128) (BGR)
+        
+        # Create masks for both greens
+        # 1. Standard Green
+        mask_standard = np.all(image == [0, 255, 0], axis=2)
+        
+        # 2. Highlight Green (Mouse over)
+        # Note: 128 (dec) = 80 (hex)
+        mask_highlight = np.all(image == [128, 255, 128], axis=2)
+        
+        # If we find pixels of either color, we are following.
+        return np.any(mask_standard) or np.any(mask_highlight)
     
     def manageFollow(self):
+        if not self.follow_party.get():
+            return
+
+        # 1. Check if we are already following (Success case)
+        if self.isFollowing():
+            return
+
+        # 2. Check Cooldown (Prevents spamming)
+        if time.time() - self.last_follow_time < self.follow_retry_delay:
+            return
+
+        # 3. Don't interrupt attack unless necessary
+        # If we are attacking and the user wants to prioritize attack, skip follow logic
+        if self.attack and self.isAttacking():
+             return
+
+        print("[DEBUG] Auto-Follow triggered...")
         
-        if self.follow_party.get():
-            #bot.walkTowardsLeader()
-            if not self.isFollowing():
-                if not self.isAttacking() or not self.attack:
-                    self.getPartyList()
-                    self.followLeader()
+        # 4. Attempt to follow
+        self.getPartyList() # Refresh positions
+        
+        if self.followLeader():
+            print(f"[DEBUG] Follow clicked. Waiting {self.follow_retry_delay}s to verify...")
+            self.last_follow_time = time.time()
         else:
-            if self.isFollowing():
-                print("clicking stop")
-                self.clickStop()
+            print("[DEBUG] Could not find leader to follow.")
+            # Reset time so it retries on next loop if it failed immediately (optional, or keep delay)
+            self.last_follow_time = time.time()
     
     def followLeader(self):
-        try:
-            unavailable = (128, 128, 128)
-            available = (192,192,192)
-            #time.sleep(character_index*0.1)
-            _,_, (x_i,y_i) = win32gui.GetCursorInfo()
-            x,y,_,_ = self.party[self.party_leader.get()]
-            for _x in range(x-7,x+50,2):
-                color = img.GetPixelRGBColor(self.hwnd,(_x,y-5))
-                if color == unavailable:
-                    return False
-                if color == available:
-                    break
-                    #img.screengrab_array(self.hwnd, (x-7,y-5,x+50,y+10),True)
-            #if (img.GetPixelRGBColor(self.hwnd,(x+2,y+2)) == (112,112,112)):
-                #print("leader far away")
-                #return
-            win32api.SetCursorPos((x,y))
-            rclick(self.hwnd,x,y)
-            time.sleep(0.05)
-            click(self.hwnd,x+20,y+34)
-            win32api.SetCursorPos((x_i,y_i))
-        except Exception as e:
-            print("error: "+str(e))
-            #print("leader not found")
+        leader_name = self.party_leader.get()
+        
+        # 1. Validation
+        if leader_name not in self.party:
             return False
+
+        try:
+            rect = self.party[leader_name]
+            
+            # --- 2. PRE-FLIGHT CHECK ---
+            check_x1 = rect[0]
+            check_y1 = rect[1] - 15 
+            check_x2 = rect[2]
+            check_y2 = rect[1]      
+            
+            name_img = img.screengrab_array(self.hwnd, (check_x1, check_y1, check_x2, check_y2))
+            
+            if name_img is not None:
+                target_color = np.array([192, 192, 192])
+                mask = np.all(name_img == target_color, axis=2)
+                if not np.any(mask):
+                    print(f"[DEBUG] Skipping follow: Leader '{leader_name}' is AWAY.")
+                    return False
+            # ---------------------------
+
+            # 3. Calculate Target Relative Coordinates
+            rel_name_x = int((rect[0] + rect[2]) / 2)
+            rel_name_y = int(rect[1] - 6) 
+            
+            # 4. Convert to Absolute Screen Coordinates
+            win_rect = win32gui.GetWindowRect(self.hwnd)
+            client_rect = win32gui.GetClientRect(self.hwnd)
+            
+            win_w = win_rect[2] - win_rect[0]
+            win_h = win_rect[3] - win_rect[1]
+            client_w = client_rect[2]
+            client_h = client_rect[3]
+            
+            border_w = (win_w - client_w) // 2
+            title_bar_h = (win_h - client_h) - border_w
+            print(f"[DEBUG] Window Border: {border_w}px, Title Bar: {title_bar_h}px")
+            abs_name_x = win_rect[0] + border_w + rel_name_x + 5
+            abs_name_y = win_rect[1] + title_bar_h + rel_name_y + 5 - 25
+            print(f"[DEBUG] Leader '{leader_name}' Name Position - Relative: ({rel_name_x}, {rel_name_y}), Absolute: ({abs_name_x}, {abs_name_y})")
+            # 5. Calculate "Follow" button position
+            off_x = 25
+            off_y = 35
+            
+            abs_menu_x = abs_name_x + off_x
+            abs_menu_y = abs_name_y + off_y
+
+            # --- DEBUG VISUALIZATION ---
+            # Capture area around the absolute click point to verify alignment
+            debug_w, debug_h = 200, 200
+            # Ensure crop doesn't go off-screen (basic clamp)
+            crop_x = max(0, abs_name_x - 50)
+            crop_y = max(0, abs_name_y - 50)
+            
+            # NOTE: We use pyscreenshot or PIL for absolute screen grab here strictly for debug
+            # Since img.screengrab_array is window-relative, let's just grab relative again for the debug image
+            # to keep it simple, but draw the *calculated* offset.
+            
+            debug_img = img.screengrab_array(self.hwnd, (rel_name_x - 50, rel_name_y - 50, rel_name_x + 150, rel_name_y + 150))
+            if debug_img is not None:
+                debug_img = np.ascontiguousarray(debug_img, dtype=np.uint8)
+                
+                # Center is (50, 50) in this crop because we grabbed name_x - 50
+                cv2.drawMarker(debug_img, (50, 50), (255, 0, 0), markerType=cv2.MARKER_CROSS, markerSize=15, thickness=2)
+                
+                # Follow button is at (50 + off_x, 50 + off_y) relative to crop
+                cv2.drawMarker(debug_img, (50 + off_x, 50 + off_y), (0, 0, 255), markerType=cv2.MARKER_CROSS, markerSize=15, thickness=2)
+                
+                cv2.imwrite("debug_follow_action.png", debug_img)
+                print("[DEBUG] Saved 'debug_follow_action.png'. Blue=RightClick, Red=LeftClick")
+            # ---------------------------
+
+            # 6. Execute Actions
+            _, _, (x_i, y_i) = win32gui.GetCursorInfo()
+            
+            # Right Click Name
+            win32api.SetCursorPos((abs_name_x, abs_name_y))
+            time.sleep(0.05) 
+            rclick(self.hwnd, abs_name_x, abs_name_y)
+            
+            # Wait for menu
+            time.sleep(0.15)
+            
+            # Left Click Follow
+            win32api.SetCursorPos((abs_menu_x, abs_menu_y))
+            click(self.hwnd, abs_menu_x, abs_menu_y)
+            
+            # Restore Mouse
+            win32api.SetCursorPos((x_i, y_i))
+            return True
+            
+        except Exception as e:
+            print("error in followLeader: " + str(e))
+            return False
+          
     def getPartyList(self):
-        x, y, x2,y2 = self.s_Party.region
+        x, y, x2, y2 = self.s_Party.region
         bar_h = 4
-        h_m_space = 2
         p_dist = 26
         
+        # We define a "Scan Column" to find the black separators
+        hp_bar_y = y + 28 
+        hp_bar_x = x + 22 
+        
+        # CAPTURE THE FULL PARTY REGION FOR DEBUGGING
+        full_party_img = img.screengrab_array(self.hwnd, (x, y, x2, y2))
+        if full_party_img is None: return
 
-        region = (x+20, y+12, x2-4, y2+1)
-        hp_bar_y = y+28 #black border
-        hp_bar_x = x+22 #black border
-        #first black pix (2,16)
+        # FIX: Make the array contiguous in memory so OpenCV can draw on it
+        full_party_img = np.ascontiguousarray(full_party_img, dtype=np.uint8)
+
         player_count = 0
+        
+        # 1. Detect Player Count (Black Pixels)
+        img_h, img_w, _ = full_party_img.shape
+        
         for _y in range(hp_bar_y, y2, 26):
-            if (img.GetPixelRGBColor(self.hwnd,(hp_bar_x,_y)) == (0,0,0)):
-                player_count+=1
-        for i in range(0,player_count):
-            name_region = (hp_bar_x-2,hp_bar_y-13+(i*p_dist),x2-30,hp_bar_y-1+(i*p_dist))
-            name_img = img.screengrab_array(self.hwnd,name_region)
-            name = img.tesser_image(name_img, 124, 255, 1, config='--psm 7')
-            #print(name)
-            name_found = False
-            for n in self.player_list.keys():  
-                if (similarString(name, n)):
-                    name = n
-                    name_found = True
-            if not name_found:
-                print("name not found: "+name)
-            else:
-                hp_bar_region = (hp_bar_x, hp_bar_y+(i*p_dist), x2-4, hp_bar_y+(i*p_dist)+bar_h)
-                self.party[name] = hp_bar_region
-        #print(self.party)
+            # Convert absolute screen Y to relative image Y
+            rel_y = _y - y
+            rel_x = hp_bar_x - x
+            
+            # Safety check
+            if rel_y >= img_h or rel_x >= img_w: break
+
+            # Get pixel from the array (Fast)
+            pixel = full_party_img[rel_y, rel_x]
+            if np.array_equal(pixel, [0, 0, 0]):
+                player_count += 1
+                # DEBUG: Draw Blue Circle on found separators
+                cv2.circle(full_party_img, (rel_x, rel_y), 2, (255, 0, 0), -1)
+
+        print(f"[DEBUG] Found {player_count} party members.")
+
+        # 2. Scan Names
+        for i in range(0, player_count):
+            abs_y1 = hp_bar_y - 13 + (i * p_dist)
+            abs_y2 = hp_bar_y - 1 + (i * p_dist)
+            abs_x1 = hp_bar_x - 2
+            abs_x2 = x2 - 30
+            
+            name_region = (abs_x1, abs_y1, abs_x2, abs_y2)
+            
+            # Capture just the name for OCR
+            name_img = img.screengrab_array(self.hwnd, name_region)
+            
+            if name_img is not None:
+                # DEBUG: Save the exact crop we send to Tesseract
+                debug_filename = f"debug_name_crop_{i}.png"
+                cv2.imwrite(debug_filename, name_img)
+                
+                # Perform OCR
+                raw_name = img.tesser_image(name_img, 124, 255, 1, config='--psm 7')
+                print(f"[DEBUG OCR] Row {i} raw read: '{raw_name}'")
+
+                # Match against known list
+                name_found = False
+                for n in self.player_list.keys():   
+                    if (similarString(raw_name, n)):
+                        name = n
+                        name_found = True
+                        break 
+                
+                if not name_found:
+                    print(f"[DEBUG OCR FAIL] Could not match '{raw_name}' to any known player.")
+                else:
+                    hp_bar_region = (hp_bar_x, hp_bar_y+(i*p_dist), x2-4, hp_bar_y+(i*p_dist)+bar_h)
+                    self.party[name] = hp_bar_region
+
+                # DEBUG: Draw Red Box around name region on the main debug image
+                rel_x1 = abs_x1 - x
+                rel_y1 = abs_y1 - y
+                rel_x2 = abs_x2 - x
+                rel_y2 = abs_y2 - y
+                cv2.rectangle(full_party_img, (rel_x1, rel_y1), (rel_x2, rel_y2), (0, 0, 255), 1)
+
+        # Save the full diagnostic image
+        cv2.imwrite("debug_party_scan.png", full_party_img)
+        print("[DEBUG] Saved 'debug_party_scan.png' and name crops.")
+
     def getPartyLeaderVitals(self):
         try:
             hp_bar = self.party[self.party_leader.get()]
