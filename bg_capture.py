@@ -16,7 +16,11 @@ class BackgroundFrameGrabber:
         self.max_fps = max_fps
         self.min_dt = 1.0 / max_fps
         self._last_t = 0.0
-        self.frame_bgr = None  # np.ndarray (H,W,3) BGR, client area only
+        self.frame_bgr = None
+
+        self._crop = None  # (x1,y1,x2,y2) window-relative
+        self._last_win_rect = None
+        self._last_client_rect = None
 
     def _capture_window_rgb(self):
         l, t, r, b = win32gui.GetWindowRect(self.hwnd)
@@ -55,6 +59,23 @@ class BackgroundFrameGrabber:
             1
         )
         return np.array(im)  # RGB
+    
+    def _refresh_crop(self):
+        win_l, win_t, win_r, win_b = win32gui.GetWindowRect(self.hwnd)
+        c0_sx, c0_sy = win32gui.ClientToScreen(self.hwnd, (0, 0))
+        off_x = c0_sx - win_l
+        off_y = c0_sy - win_t
+        _, _, cw, ch = win32gui.GetClientRect(self.hwnd)
+        self._crop = (off_x, off_y, off_x + cw, off_y + ch)
+
+        self._last_win_rect = (win_l, win_t, win_r, win_b)
+        self._last_client_rect = (0, 0, cw, ch)
+
+    def _maybe_refresh_crop(self):
+        win_rect = win32gui.GetWindowRect(self.hwnd)
+        client_rect = win32gui.GetClientRect(self.hwnd)
+        if self._crop is None or win_rect != self._last_win_rect or client_rect != self._last_client_rect:
+            self._refresh_crop()
 
     def _window_to_client_crop(self, window_rgb):
         # Convert client origin to WINDOW-relative coordinates
@@ -81,12 +102,14 @@ class BackgroundFrameGrabber:
         if window_rgb is None:
             return False
 
-        client_rgb = self._window_to_client_crop(window_rgb)
+        self._maybe_refresh_crop()
+        x1, y1, x2, y2 = self._crop
 
-        # Convert RGB->BGR for OpenCV-style consistency
+        client_rgb = window_rgb[y1:y2, x1:x2]
         self.frame_bgr = client_rgb[:, :, ::-1].copy()
         self._last_t = now
         return True
+
 
     def get_pixel_rgb(self, cx, cy):
         """
@@ -101,3 +124,26 @@ class BackgroundFrameGrabber:
             return (999, 999, 999)
         b, g, r = f[cy, cx]
         return (int(r), int(g), int(b))
+    
+    def get_region_bgr(self, area):
+        """
+        area: (x1,y1,x2,y2) in CLIENT coords, x2/y2 exclusive
+        returns np.ndarray BGR or None
+        """
+        f = self.frame_bgr
+        if f is None:
+            return None
+
+        x1, y1, x2, y2 = area
+        h, w, _ = f.shape
+
+        # clamp
+        x1 = max(0, min(w, x1))
+        x2 = max(0, min(w, x2))
+        y1 = max(0, min(h, y1))
+        y2 = max(0, min(h, y2))
+
+        if x2 <= x1 or y2 <= y1:
+            return None
+
+        return f[y1:y2, x1:x2]

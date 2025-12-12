@@ -11,8 +11,6 @@ import numpy as np
 class BaseElement(ABC):
     region = (0,0,0,0) #(x,y, x+w,y+h)
     detected = False
-    LEFT = -8
-    TOP = -8
     folder = "hud/"
     def __init__(self, name,hwnd,search_image='',search_region_function = lambda w,h: (0,0,0,0)):
         self.name = name
@@ -71,15 +69,22 @@ class BoundScreenElement(BaseElement):
         else:
             print("found BoundScreenElement "+ self.name+ " start or end")
         x1, y1, width, height = found_start
-        x1 += region_start[0]-self.LEFT
-        y1 += region_start[1]-self.TOP
-        x2, y2, _, _ = found_end
-        x2 += region_end[0]-self.LEFT
-        y2 += region_end[1]-self.TOP
+        x1 += region_start[0]
+        y1 += region_start[1]
 
-        self.region = (x1+width+self.start_offsets[0], y1+self.start_offsets[1], x2+self.end_offsets[0], y2+height+self.end_offsets[1])
+        x2, y2, _, _ = found_end
+        x2 += region_end[0]
+        y2 += region_end[1]
+
+        self.region = (
+            x1 + width + self.start_offsets[0],
+            y1 + self.start_offsets[1],
+            x2 + self.end_offsets[0],
+            y2 + height + self.end_offsets[1],
+        )
         self.detected = True
         return True
+
     
 
 def find_bounding_box_black_border(
@@ -331,11 +336,11 @@ class GameScreenElement(BaseElement):
             return False
 
         x1, y1, width, height = found_start
-        x1 += region_start[0] - self.LEFT
-        y1 += region_start[1] - self.TOP + 54
+        x1 += region_start[0] 
+        y1 += region_start[1]  + 54
         x2, y2, _, _ = found_end
-        x2 += region_end[0] - self.LEFT
-        y2 += region_end[1] - self.TOP - 26
+        x2 += region_end[0] 
+        y2 += region_end[1]  - 26
 
         candidate_area = (x1, y1, x2, y2+height)
         screenshot = img.screengrab_array(self.hwnd, candidate_area)
@@ -424,8 +429,8 @@ class ScreenElement(BaseElement):
             if (self.elem_width == 0):
                 self.elem_width = img_w
                 self.elem_height = img_h
-            x = self.search_region[0] + x2 + self.x_offset - self.LEFT
-            y = self.search_region[1] + y2 + self.y_offset - self.TOP
+            x = self.search_region[0] + x2 + self.x_offset 
+            y = self.search_region[1] + y2 + self.y_offset 
             self.region = (x, y, x+self.elem_width, y+self.elem_height)
             self.detected = True
             return True
@@ -447,11 +452,11 @@ class ScreenWindow(ScreenElement):
         region = self.right_region_function(game_w,game_h)
         #img.visualize_fast(img.area_screenshot(self.hwnd,region))
 
-        window_top = img.locateImage(self.hwnd, self.folder+self.search_image, region, 0.85)
+        window_top = img.locateImage(self.hwnd, self.folder+self.search_image, region, 0.8)
         window_bottom = img.locateManyImage(self.hwnd,self.folder+'battle_list_end.png', region, 0.85)
         if not window_top:
             region = self.left_region_function(game_w,game_h)
-            window_top = img.locateImage(self.hwnd, self.folder+self.search_image, region, 0.85)
+            window_top = img.locateImage(self.hwnd, self.folder+self.search_image, region, 0.8)
             window_bottom = img.locateManyImage(self.hwnd,self.folder+'battle_list_end.png', region, 0.85)
         if not window_top:
             print("couldn't find {} on screen".format(self.name))
@@ -473,8 +478,8 @@ class ScreenWindow(ScreenElement):
             window_bottom = closest
             top_x, top_y, top_width, top_height = window_top
             bottom_x,bottom_y,bottom_width,bottom_height = window_bottom
-            self.region = (region[0]+top_x - self.LEFT, region[1] + top_y - self.TOP,
-                           region[0]+top_x + top_width - self.LEFT, region[1] + bottom_y + bottom_height - self.TOP)
+            self.region = (region[0]+top_x , region[1] + top_y ,
+                           region[0]+top_x + top_width , region[1] + bottom_y + bottom_height )
             self.detected = True
             print("found {} on screen".format(self.name))
             return True

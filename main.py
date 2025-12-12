@@ -1,29 +1,23 @@
 # region Imports
-import win32gui
+import win32gui,win32api
 from ctypes import windll
 import time
-import pytesseract
 import cv2
 import imutils
 import numpy as np
-import tkinter as tk
-from tkinter import messagebox
+
 import PIL
 import os
 import keyboard as kb
 from pynput import keyboard
 from math import sqrt
-from tkinter import BooleanVar
 # data
 from collections import deque
-import winsound
 #from natsort import natsorted
 import win32com.client as comclt
 from scipy.ndimage import morphology
 from scipy.spatial import distance
-from scipy.stats import moment
 wsh= comclt.Dispatch("WScript.Shell")
-pytesseract.pytesseract.tesseract_cmd = r"C:\\Tesseract-OCR\\tesseract.exe"
 
 #LOCAL
 import data
@@ -36,6 +30,8 @@ from choose_client_gui import choose_capture_window
 from main_GUI import *
 from tkinter import BooleanVar,StringVar,IntVar,PhotoImage
 from functools import partial
+from bg_capture import BackgroundFrameGrabber
+
 # endregion
 
 class Bot:
@@ -43,6 +39,7 @@ class Bot:
     def __init__(self):
         self.base_directory = os.getcwd()
         self.hwnd = choose_capture_window()
+        self.bg = BackgroundFrameGrabber(self.hwnd, max_fps=50)
         self.character_name = self.getCharacterName()
         if (self.character_name == None):
             print("You are not logged in.")
@@ -244,6 +241,11 @@ class Bot:
         self.last_follow_time = 0 
         self.follow_retry_delay = 2.5
         
+    def updateFrame(self):
+        ok = self.bg.update()
+        if ok and self.bg.frame_bgr is not None:
+            img.set_cached_frame(self.hwnd, self.bg.frame_bgr)
+
     def updateWindowCoordinates(self):
         maximizeWindow(self.hwnd)
         l, t, r, b = win32gui.GetWindowRect(self.hwnd)
@@ -252,6 +254,7 @@ class Bot:
             self.left, self.top, self.right, self.bottom = l, t, r, b
             self.height = abs(self.bottom - self.top)
             self.width = abs(self.right - self.left)
+            self.bg._refresh_crop()
             self.updateAllElements()
             self.getPartyList()
         else:
@@ -375,8 +378,8 @@ class Bot:
         button = img.locateImage(self.hwnd,'hud/chat_enabled_button.png', region, 0.96,False)
         if (button):
             x, y, b_w, b_h = button
-            x = x+region[0]-self.left
-            y = y+region[1]-self.top
+            x = x+region[0]
+            y = y+region[1]
             self.chat_status_region = [x, y, x+(b_w*2), y+b_h]
     def clickWindowButton(self,pos):
         '''pos: starts from 1'''
@@ -1421,32 +1424,15 @@ class Bot:
             self.last_equip_time = timeInMillis()
             
     def isFollowing(self):
-        """
-        Checks if the green follow border exists in the Party Window.
-        Colors: Standard Green (0, 255, 0) and Highlight Green (128, 255, 128).
-        """
-        b_x, b_y, w, h = self.s_Party.region
-        
-        # Capture the whole party window to find the border
-        image = img.screengrab_array(self.hwnd, (b_x, b_y, w, h))
-        
+        x1, y1, x2, y2 = self.s_Party.region
+        image = img.screengrab_array(self.hwnd, (x1, y1, x2, y2))
         if image is None:
             return False
 
-        # OpenCV images are BGR.
-        # 00FF00 (RGB) -> (0, 255, 0) (BGR)
-        # 80FF80 (RGB) -> (128, 255, 128) (BGR)
-        
-        # Create masks for both greens
-        # 1. Standard Green
         mask_standard = np.all(image == [0, 255, 0], axis=2)
-        
-        # 2. Highlight Green (Mouse over)
-        # Note: 128 (dec) = 80 (hex)
         mask_highlight = np.all(image == [128, 255, 128], axis=2)
-        
-        # If we find pixels of either color, we are following.
         return np.any(mask_standard) or np.any(mask_highlight)
+
     
     def manageFollow(self):
         if not self.follow_party.get():
@@ -1455,7 +1441,7 @@ class Bot:
         # 1. Check if we are already following (Success case)
         if self.isFollowing():
             return
-
+        print("[DEBUG] Not currently following.")
         # 2. Check Cooldown (Prevents spamming)
         if time.time() - self.last_follow_time < self.follow_retry_delay:
             return
@@ -1480,103 +1466,56 @@ class Bot:
     
     def followLeader(self):
         leader_name = self.party_leader.get()
-        
-        # 1. Validation
+
         if leader_name not in self.party:
             return False
 
         try:
-            rect = self.party[leader_name]
-            
-            # --- 2. PRE-FLIGHT CHECK ---
-            check_x1 = rect[0]
-            check_y1 = rect[1] - 15 
-            check_x2 = rect[2]
-            check_y2 = rect[1]      
-            
-            name_img = img.screengrab_array(self.hwnd, (check_x1, check_y1, check_x2, check_y2))
-            
+            name_rect = self.party[leader_name]["name_rect"]  # (x1,y1,x2,y2) CLIENT coords
+            x1, y1, x2, y2 = name_rect
+
+            # --- PRE-FLIGHT (leader not away) ---
+            name_img = img.screengrab_array(self.hwnd, name_rect)
             if name_img is not None:
-                target_color = np.array([192, 192, 192])
-                mask = np.all(name_img == target_color, axis=2)
-                if not np.any(mask):
+                target_color = np.array([192, 192, 192])  # BGR in your pipeline, but 192,192,192 is symmetric
+                if not np.any(np.all(name_img == target_color, axis=2)):
                     print(f"[DEBUG] Skipping follow: Leader '{leader_name}' is AWAY.")
                     return False
-            # ---------------------------
 
-            # 3. Calculate Target Relative Coordinates
-            rel_name_x = int((rect[0] + rect[2]) / 2)
-            rel_name_y = int(rect[1] - 6) 
-            
-            # 4. Convert to Absolute Screen Coordinates
-            win_rect = win32gui.GetWindowRect(self.hwnd)
-            client_rect = win32gui.GetClientRect(self.hwnd)
-            
-            win_w = win_rect[2] - win_rect[0]
-            win_h = win_rect[3] - win_rect[1]
-            client_w = client_rect[2]
-            client_h = client_rect[3]
-            
-            border_w = (win_w - client_w) // 2
-            title_bar_h = (win_h - client_h) - border_w
-            print(f"[DEBUG] Window Border: {border_w}px, Title Bar: {title_bar_h}px")
-            abs_name_x = win_rect[0] + border_w + rel_name_x + 5
-            abs_name_y = win_rect[1] + title_bar_h + rel_name_y + 5 - 25
-            print(f"[DEBUG] Leader '{leader_name}' Name Position - Relative: ({rel_name_x}, {rel_name_y}), Absolute: ({abs_name_x}, {abs_name_y})")
-            # 5. Calculate "Follow" button position
-            off_x = 25
+            # Click center of the name row (CLIENT coords)
+            click_x = (x1 + x2) // 2
+            click_y = (y1 + y2) // 2
+
+            # Context menu "Follow" offset (CLIENT coords)
+            off_x = 35
             off_y = 35
-            
-            abs_menu_x = abs_name_x + off_x
-            abs_menu_y = abs_name_y + off_y
+            menu_x = click_x + off_x
+            menu_y = click_y + off_y
 
-            # --- DEBUG VISUALIZATION ---
-            # Capture area around the absolute click point to verify alignment
-            debug_w, debug_h = 200, 200
-            # Ensure crop doesn't go off-screen (basic clamp)
-            crop_x = max(0, abs_name_x - 50)
-            crop_y = max(0, abs_name_y - 50)
             
-            # NOTE: We use pyscreenshot or PIL for absolute screen grab here strictly for debug
-            # Since img.screengrab_array is window-relative, let's just grab relative again for the debug image
-            # to keep it simple, but draw the *calculated* offset.
-            
-            debug_img = img.screengrab_array(self.hwnd, (rel_name_x - 50, rel_name_y - 50, rel_name_x + 150, rel_name_y + 150))
+
+            # Execute (CLIENT coords only)
+            _, _, (x_i, y_i) = win32gui.GetCursorInfo()
+            win32api.SetCursorPos((click_x, click_y))
+            time.sleep(0.05) 
+            rclick_client(self.hwnd, click_x, click_y)
+            time.sleep(1)
+            # Debug image: crop around the click point (CLIENT coords)
+            debug_img = img.screengrab_array(self.hwnd, (click_x - 50, click_y - 50, click_x + 150, click_y + 150))
             if debug_img is not None:
                 debug_img = np.ascontiguousarray(debug_img, dtype=np.uint8)
-                
-                # Center is (50, 50) in this crop because we grabbed name_x - 50
                 cv2.drawMarker(debug_img, (50, 50), (255, 0, 0), markerType=cv2.MARKER_CROSS, markerSize=15, thickness=2)
-                
-                # Follow button is at (50 + off_x, 50 + off_y) relative to crop
                 cv2.drawMarker(debug_img, (50 + off_x, 50 + off_y), (0, 0, 255), markerType=cv2.MARKER_CROSS, markerSize=15, thickness=2)
-                
                 cv2.imwrite("debug_follow_action.png", debug_img)
-                print("[DEBUG] Saved 'debug_follow_action.png'. Blue=RightClick, Red=LeftClick")
-            # ---------------------------
-
-            # 6. Execute Actions
-            _, _, (x_i, y_i) = win32gui.GetCursorInfo()
-            
-            # Right Click Name
-            win32api.SetCursorPos((abs_name_x, abs_name_y))
-            time.sleep(0.05) 
-            rclick_client(self.hwnd, abs_name_x, abs_name_y)
-            
-            # Wait for menu
-            time.sleep(0.15)
-            
-            # Left Click Follow
-            win32api.SetCursorPos((abs_menu_x, abs_menu_y))
-            click_client(self.hwnd, abs_menu_x, abs_menu_y)
-            
-            # Restore Mouse
+            win32api.SetCursorPos((menu_x, menu_y))
+            click_client(self.hwnd, menu_x, menu_y)
             win32api.SetCursorPos((x_i, y_i))
             return True
-            
+
         except Exception as e:
             print("error in followLeader: " + str(e))
             return False
+
           
     def getPartyList(self):
         x, y, x2, y2 = self.s_Party.region
@@ -1649,7 +1588,10 @@ class Bot:
                     print(f"[DEBUG OCR FAIL] Could not match '{raw_name}' to any known player.")
                 else:
                     hp_bar_region = (hp_bar_x, hp_bar_y+(i*p_dist), x2-4, hp_bar_y+(i*p_dist)+bar_h)
-                    self.party[name] = hp_bar_region
+                    self.party[name] = {
+                        "hp_bar": hp_bar_region,
+                        "name_rect": name_region,   # <-- this is the clickable name area in CLIENT coords
+                    }
 
                 # DEBUG: Draw Red Box around name region on the main debug image
                 rel_x1 = abs_x1 - x
@@ -1664,26 +1606,24 @@ class Bot:
 
     def getPartyLeaderVitals(self):
         try:
-            hp_bar = self.party[self.party_leader.get()]
-            hppc = 0
-            cant = 0
-            y = hp_bar[1]+2
-            bar_width = hp_bar[2]-hp_bar[0]
-            #img.screengrab_array(hp_bar)
+            hp_bar = self.party[self.party_leader.get()]["hp_bar"]
+            y = hp_bar[1] + 2
+            bar_width = hp_bar[2] - hp_bar[0]
+
             delta = 5
-            for x in range(hp_bar[0], hp_bar[2], delta):
-                color = img.GetPixelRGBColor(self.hwnd,(x, y))
-                dist = img.ColorDistance(color, (75, 75, 75))
-                if (dist <= 15):
-                    cant += 1
-            cant *= delta
-            hppc = 100 * (bar_width-cant)/bar_width
-            #y = mp_bar[1]+6
             cant = 0
-            #print(hppc)
+            for x in range(hp_bar[0], hp_bar[2], delta):
+                color = img.GetPixelRGBColor(self.hwnd, (x, y))
+                dist = img.ColorDistance(color, (75, 75, 75))
+                if dist <= 15:
+                    cant += 1
+
+            cant *= delta
+            hppc = 100 * (bar_width - cant) / bar_width
             return hppc
         except:
             return 100
+
 
     def healParty(self):
         if self.vocation == "druid":
@@ -1824,8 +1764,8 @@ class Bot:
                     # --- 1. VISUALIZATION / DISTANCE POINT (True Center) ---
                     # We use this for Distance calculation and Visualization lines.
                     # It represents the geometric center of the mark.
-                    vis_x = int(pos[0] + (w / 2) - img.left)
-                    vis_y = int(pos[1] + (h / 2) - img.top)
+                    vis_x = int(pos[0] + (w / 2))
+                    vis_y = int(pos[1] + (h / 2))
                     
                     # --- 2. CLICK POINT (Action Anchor) ---
                     # We use this ONLY for clicking. 
@@ -2053,6 +1993,7 @@ class Bot:
 if __name__ == "__main__":
     
     bot = Bot()
+    bot.updateFrame()
     bot.test()
     bot.updateAllElements()
     bot.updateActionbarSlotStatus()
@@ -2071,6 +2012,7 @@ if __name__ == "__main__":
     while(True): 
         #time.sleep(1)
         bot.GUI.loop()
+        bot.updateFrame()
         bot.updateWindowCoordinates()
         bot.checkAndDetectElements()
         bot.getBuffs()

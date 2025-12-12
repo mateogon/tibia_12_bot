@@ -10,11 +10,47 @@ import os
 from extras import timeit
 from math import sqrt
 from extras import timeInMillis
+from typing import Dict
 #from natsort import natsorted
 pytesseract.pytesseract.tesseract_cmd = r"C:\\Tesseract-OCR\\tesseract.exe"
 
-left = -8
-top = -8
+_CACHED_HWND = None
+_CACHED_FRAME_BGR = None  # np.ndarray (H,W,3) BGR, client area
+_TEMPLATE_CACHE: Dict[str, np.ndarray] = {}
+
+def set_cached_frame(hwnd, frame_bgr):
+    global _CACHED_HWND, _CACHED_FRAME_BGR
+    _CACHED_HWND = hwnd
+    _CACHED_FRAME_BGR = frame_bgr
+
+def clear_cached_frame():
+    global _CACHED_HWND, _CACHED_FRAME_BGR
+    _CACHED_HWND = None
+    _CACHED_FRAME_BGR = None
+
+def _get_cached_region(hwnd, area):
+    if _CACHED_FRAME_BGR is None or _CACHED_HWND != hwnd:
+        return None
+    x1, y1, x2, y2 = area
+    h, w, _ = _CACHED_FRAME_BGR.shape
+    x1 = max(0, min(w, x1)); x2 = max(0, min(w, x2))
+    y1 = max(0, min(h, y1)); y2 = max(0, min(h, y2))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return _CACHED_FRAME_BGR[y1:y2, x1:x2]
+
+def load_template(rel_path: str):
+    """
+    rel_path example: 'hud/stop.png' or 'buffs/haste.png'
+    Returns BGR template (np.ndarray) or None.
+    """
+    key = rel_path.replace("\\", "/")
+    t = _TEMPLATE_CACHE.get(key)
+    if t is not None:
+        return t
+    t = cv2.imread("img/" + key)
+    _TEMPLATE_CACHE[key] = t
+    return t
 
 def tesser_image(im, a, b, c, config):
     thresh = [cv2.THRESH_BINARY, cv2.THRESH_BINARY_INV,
@@ -44,38 +80,10 @@ def visualize(img):
 def visualize_fast(img):
     cv2.imshow('im', img)
     
-def area_screenshot(hwnd,area, show=False):
-    left, top, right, bottom = win32gui.GetWindowRect(hwnd)
-    game_h = bottom - top
-    game_w = right - left
-    hwndDC = win32gui.GetWindowDC(hwnd)
-    mfcDC = win32ui.CreateDCFromHandle(hwndDC)
-    saveDC = mfcDC.CreateCompatibleDC()
-    saveBitMap = win32ui.CreateBitmap()
-    saveBitMap.CreateCompatibleBitmap(mfcDC, game_w, game_h)
+def area_screenshot(hwnd, area, show=False):
+    return _get_cached_region(hwnd, area)
 
-    saveDC.SelectObject(saveBitMap)
-    result = windll.user32.PrintWindow(hwnd, saveDC.GetSafeHdc(), 2)
-    bmpinfo = saveBitMap.GetInfo()
-    bmpstr = saveBitMap.GetBitmapBits(True)
-    im = PIL.Image.frombuffer(
-        'RGB',
-        (bmpinfo['bmWidth'], bmpinfo['bmHeight']),
-        bmpstr, 'raw', 'BGRX', 0, 1)
-    win32gui.DeleteObject(saveBitMap.GetHandle())
-    saveDC.DeleteDC()
-    mfcDC.DeleteDC()
-    win32gui.ReleaseDC(hwnd, hwndDC)
-    if result == 1:
-        im = im.crop(area)
-        #im.transpose(PIL.Image.ROTATE_180)
-        im = np.array(im)
-        im = im[:, :, ::-1]
-        #im = PIL.Image.fromarray(im)
-        #im = np.array(im)
-        return im
-    else:
-        print("image crop failed")
+
 def compareImages(lista):
     #os.chdir(os.getcwd())
     images = []
@@ -115,18 +123,17 @@ def listColors(file):
 
 def locateImage(hwnd, file, region, thresh, show=False):
     img_rgb = screengrab_array(hwnd, region, show)
-    
     if img_rgb is None:
-        print(f"locateImage failed: Screen capture returned None for {file}")
         return False
 
     if isinstance(file, str):
-        template = cv2.imread('img/' + file)
+        template = load_template(file)
+        if template is None:
+            return False
     else:
         template = file
 
-    height, width, channels = template.shape
-    h, w = template.shape[:-1]
+    h, w = template.shape[:2]
     
     try:
         res = cv2.matchTemplate(img_rgb, template, cv2.TM_CCOEFF_NORMED)
@@ -153,25 +160,26 @@ def locateImage(hwnd, file, region, thresh, show=False):
             visualize(img_rgb_vis)
             
         if pos is not None:
-            return (pos[0] + left, pos[1] + top, w, h)
+            return (pos[0], pos[1], w, h)
         else:
             return False
     except Exception as e:
         print(f"An error occurred: {e}")
         return False
-def locateManyImage(hwnd,file, region, thresh, show=False):
-    img_rgb = screengrab_array(hwnd,region)
-    
+        
+def locateManyImage(hwnd, file, region, thresh, show=False):
+    img_rgb = screengrab_array(hwnd, region)
     if img_rgb is None:
         return False
 
+    template = load_template(file)
+    if template is None:
+        return False
+
+    h, w = template.shape[:2]
     if show:
         img_rgb_vis = cv2.cvtColor( img_rgb, cv2.COLOR_BGR2GRAY)
 
-    template = cv2.imread('img/'+file)
-    height, width, channels = template.shape
-    h, w = template.shape[:-1]
-    
     try:
         res = cv2.matchTemplate(img_rgb, template, cv2.TM_CCOEFF_NORMED)
     except cv2.error:
@@ -183,7 +191,7 @@ def locateManyImage(hwnd,file, region, thresh, show=False):
     for pt in zip(*loc[::-1]):  # Switch collumns and rows
         if show:
             cv2.rectangle(img_rgb_vis, pt, (pt[0] + w, pt[1] + h), (255, 0, 0),1)
-        pt = (pt[0]+left, pt[1]+top, w, h)
+        pt = (pt[0], pt[1], w, h)
         pos.append(pt)
     try:
         if show:
@@ -192,24 +200,20 @@ def locateManyImage(hwnd,file, region, thresh, show=False):
     except:
         return False
     
-def imageListExist(hwnd,lista, folder, region, thresh):
+def imageListExist(hwnd, lista, folder, region, thresh):
     d = {}
-    img_rgb = screengrab_array(hwnd,region)
-    
-    # If capture failed, assume nothing exists to prevent crash
+    img_rgb = screengrab_array(hwnd, region)
     if img_rgb is None:
-        for file in lista:
-            d[file] = False
+        for f in lista: d[f] = False
         return d
 
-    os.chdir(os.getcwd())
     for file in lista:
-        template = cv2.imread('img/'+folder+'/' + file + '.png')
+        template = load_template(f"{folder}/{file}.png")
         if template is None:
-            print("image not found: "+'img/'+folder+'/' + file + '.png')
+            d[file] = False
             continue
-        height, width, channels = template.shape
-        h, w = template.shape[:-1]
+
+        h, w = template.shape[:2]
         
         try:
             res = cv2.matchTemplate(img_rgb, template, cv2.TM_CCOEFF_NORMED)
@@ -233,56 +237,14 @@ def ColorDistance(rgb1, rgb2):
     cr, cg, cb = rgb2
     color_diff = sqrt((r - cr)**2 + (g - cg)**2 + (b - cb)**2)
     return color_diff
-def GetPixelRGBColor22(hwnd, pos):
-    rect = win32gui.GetWindowRect(hwnd)
-    abs_x = rect[0] + pos[0]
-    abs_y = rect[1] + pos[1]
-    hwndDC = win32gui.GetWindowDC(hwnd)
-    try:
-        ret = win32gui.GetPixel(hwndDC, abs_x, abs_y)
-        r, g, b = ret & 0xff, (ret >> 8) & 0xff, (ret >> 16) & 0xff
-    except:
-        r, g, b = 999, 999, 999
-    win32gui.ReleaseDC(hwnd, hwndDC)
-    return (r, g, b)
 
-def GetPixelRGBColor(hwnd,pos):
-    rect = win32gui.GetWindowRect(hwnd)
-    w = abs(rect[2] - rect[0])
-    h = abs(rect[3] - rect[1])
-    hwndDC = win32gui.GetWindowDC(hwnd)
-    mfcDC = win32ui.CreateDCFromHandle(hwndDC)
-    saveDC = mfcDC.CreateCompatibleDC()
-    saveBitMap = win32ui.CreateBitmap()
-    saveBitMap.CreateCompatibleBitmap(mfcDC, w, h)
-    saveDC.SelectObject(saveBitMap)
+def GetPixelRGBColor(hwnd, pos):
+    cached = _get_cached_region(hwnd, (pos[0], pos[1], pos[0] + 1, pos[1] + 1))
+    if cached is None:
+        return (999, 999, 999)
+    b, g, r = cached[0, 0]
+    return (int(r), int(g), int(b))
 
-    try:
-        ret = win32gui.GetPixel(hwndDC, pos[0], pos[1])
-        r, g, b = ret & 0xff, (ret >> 8) & 0xff, (ret >> 16) & 0xff
-    except:
-        r, b, g = 999, 999, 999
-
-    mfcDC.DeleteDC()
-    saveDC.DeleteDC()
-    win32gui.ReleaseDC(hwnd, hwndDC)
-    win32gui.DeleteObject(saveBitMap.GetHandle())
-
-    return (r, g, b)
-
-def GetPixelRGBColor2(hwnd,pos):
-    
-
-    hwndDC = win32gui.GetWindowDC(hwnd)
-    try:
-        ret = win32gui.GetPixel(hwndDC, pos[0], pos[1])
-        r, g, b = ret & 0xff, (ret >> 8) & 0xff, (ret >> 16) & 0xff
-    except:
-        r, b, g = 999, 999, 999
-    
-    win32gui.ReleaseDC(hwnd, hwndDC)
-    
-    return (r, g, b)
 
 def lookForColor(hwnd,color, region, dx=3, dy=3,test = False):
     begin_x, begin_y, end_x, end_y = region
