@@ -47,3 +47,14 @@ def press(hwnd,*args):
         win32api.SendMessage(hwnd, win32con.WM_KEYDOWN, data.VK_CODE[i], 0)
         #time.sleep(.05)
         win32api.SendMessage(hwnd, win32con.WM_KEYUP, data.VK_CODE[i], 0)
+
+
+def click_client(hwnd, cx, cy):
+    lParam = win32api.MAKELONG(cx, cy)
+    win32gui.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, lParam)
+    win32gui.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, lParam)
+
+def rclick_client(hwnd, cx, cy):
+    lParam = win32api.MAKELONG(cx, cy)
+    win32gui.PostMessage(hwnd, win32con.WM_RBUTTONDOWN, win32con.MK_RBUTTON, lParam)
+    win32gui.PostMessage(hwnd, win32con.WM_RBUTTONUP, 0, lParam)

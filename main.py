@@ -394,7 +394,7 @@ class Bot:
         x = int((area[2]+area[0])/2)
         y = int((area[3]+area[1])/2)
         print((x,y))
-        click(self.hwnd,x,y)
+        click_client(self.hwnd,x,y)
     
     def getActionbarSlotPosition(self,pos):
         box_width = 34
@@ -413,7 +413,7 @@ class Bot:
 
         # 2. Perform the click
         x, y = self.getActionbarSlotPosition(pos)
-        click(self.hwnd, x, y)
+        click_client(self.hwnd, x, y)
         return True
     
     def updateActionbarSlotStatus(self):
@@ -508,9 +508,9 @@ class Bot:
                     for i in range(0,5):
                         #win32api.SetCursorPos((positions[j][0],positions[j][1]))
                         if not left:
-                            rclick(self.hwnd,positions[j][0],positions[j][1])
+                            rclick_client(self.hwnd,positions[j][0],positions[j][1])
                         else:
-                            click(self.hwnd,positions[j][0],positions[j][1])
+                            click_client(self.hwnd,positions[j][0],positions[j][1])
                         #cv2.circle(image,(positions[j][0]-region[0],positions[j][1]-region[1]), 3, (255,0,0), -1)
                         time.sleep(0.03)
                 #time.sleep(0.1)
@@ -566,7 +566,7 @@ class Bot:
             x = contours[0][0].item(0)
             y = contours[0][0].item(1)
             
-            rclick(self.hwnd,int(game_screen_region[0]+x),int(game_screen_region[1]+y+self.s_GameScreen.tile_h/2))
+            rclick_client(self.hwnd,int(game_screen_region[0]+x),int(game_screen_region[1]+y+self.s_GameScreen.tile_h/2))
             time.sleep(0.2)
             #40 x 210
         except Exception as e:
@@ -1037,7 +1037,7 @@ class Bot:
                 abs_y = region[1] + rel_y
                 
                 print(f"clicking attack at: {(abs_x, abs_y)}")
-                click(self.hwnd, abs_x, abs_y)
+                click_client(self.hwnd, abs_x, abs_y)
                 
                 # Stop after clicking the first valid target
                 return
@@ -1058,7 +1058,7 @@ class Bot:
             if (color in colors):
                 #if (vocation == "knight" and y != first_pos):
                 #    return False
-                click(self.hwnd,x, y)
+                click_client(self.hwnd,x, y)
                     
     def updateLastAttackTime(self):
         self.last_attack_time = timeInMillis()
@@ -1091,7 +1091,7 @@ class Bot:
         #cv2.circle(image, (x,y), 5, (255,0,0), 2)
         #cv2.line(image, (l_x,l_y), (relative_center[0],relative_center[1]), (255,0,0), 2)
         #img.visualize_fast(image)
-        click(self.hwnd,region[0]+x,region[1]+y)
+        click_client(self.hwnd,region[0]+x,region[1]+y)
     def updatePartyPositions(self):
         party_contours = self.getPartyAroundContours(9)
         party_cnts = imutils.grab_contours(party_contours)
@@ -1243,7 +1243,7 @@ class Bot:
                 #self.clickActionBar(self.hwnd,self.area_rune_hotkey)
                 #press(self.hwnd,self.area_rune_hotkey)
                 time.sleep(0.005)
-                click(self.hwnd,region[0]+x,region[1]+y)
+                click_client(self.hwnd,region[0]+x,region[1]+y)
         #print(timeInMillis()-start)
     def walkAwayFromMonsters(self):
         region = self.s_GameScreen.region
@@ -1275,7 +1275,7 @@ class Bot:
         #cv2.circle(image, (x,y), 5, (255,0,0), 2)
         cv2.line(image, (x,y), (relative_center[0],relative_center[1]), (255,0,0), 2)
         img.visualize_fast(image)
-        #click(self.hwnd,region[0]+x,region[1]+y)
+        #click_client(self.hwnd,region[0]+x,region[1]+y)
         
     
     def useAreaAmmo(self):
@@ -1337,7 +1337,7 @@ class Bot:
                 pos = (region[0]+min_cont[0],region[1]+min_cont[1]+offset)
                 #cv2.circle(image,(min_cont[0],min_cont[1]),7,(0,255,0),-1)
                 #img.visualize_fast(image)
-                rclick(self.hwnd,pos[0],pos[1])
+                rclick_client(self.hwnd,pos[0],pos[1])
     
     
     def attackSpells(self):
@@ -1561,14 +1561,14 @@ class Bot:
             # Right Click Name
             win32api.SetCursorPos((abs_name_x, abs_name_y))
             time.sleep(0.05) 
-            rclick(self.hwnd, abs_name_x, abs_name_y)
+            rclick_client(self.hwnd, abs_name_x, abs_name_y)
             
             # Wait for menu
             time.sleep(0.15)
             
             # Left Click Follow
             win32api.SetCursorPos((abs_menu_x, abs_menu_y))
-            click(self.hwnd, abs_menu_x, abs_menu_y)
+            click_client(self.hwnd, abs_menu_x, abs_menu_y)
             
             # Restore Mouse
             win32api.SetCursorPos((x_i, y_i))
@@ -1733,7 +1733,7 @@ class Bot:
                     if timeInMillis() - self.last_walk_time > walk_delay:
                         #print(str(walk_delay))
                         #print("clicking mark")
-                        click(self.hwnd,pos[0],pos[1])
+                        click_client(self.hwnd,pos[0],pos[1])
                         self.last_walk_time = timeInMillis()
 
     def cavebot_distance(self):
@@ -1773,11 +1773,11 @@ class Bot:
                 print("walking")
             #print(str(walk_delay))
             #print("clicking mark")
-                click(self.hwnd,pos[0],pos[1])
+                click_client(self.hwnd,pos[0],pos[1])
                 self.last_walk_time = timeInMillis()
     def clickStop(self):
         region = self.s_Stop.getCenter()
-        click(self.hwnd,region[0],region[1])                     
+        click_client(self.hwnd,region[0],region[1])                     
     def getCenterMarkImage(self):
         map_center = self.s_Map.center
         region = (map_center[0]-5, map_center[1]-5, map_center[0]+5, map_center[1]+5)
@@ -1951,12 +1951,12 @@ class Bot:
             x_ok, y_ok, ok_w, ok_h = ok_button
             time.sleep(0.1)
             sell_x_off, sell_y_off = 149, 43
-            click(self.hwnd,region[0]+sell_x_off,region[1]+sell_y_off)
+            click_client(self.hwnd,region[0]+sell_x_off,region[1]+sell_y_off)
             #buy_pressed = img.locateImage(self.hwnd,'/hud/npc_trade_buy_pressed.png', region, 0.97)
             #if buy_pressed:
             #    x_buy, y_buy, w_buy, h_buy = buy_pressed
             #    print("clicking sell button")
-            #    click(self.hwnd,region[0]+x_buy + int(w_buy/2),
+            #    click_client(self.hwnd,region[0]+x_buy + int(w_buy/2),
             #        region[1]+y_buy+int(3*h_buy/2))
             #else:
             #    buy_unpressed = img.locateImage(self.hwnd,'/hud/npc_trade_buy_unpressed.png', region, 0.83, True)
@@ -1964,7 +1964,7 @@ class Bot:
             time.sleep(0.1)
             counter = 0
             while (True):
-                click(self.hwnd,region[0]+100 , region[1]+75)
+                click_client(self.hwnd,region[0]+100 , region[1]+75)
                 time.sleep(0.05)
                 current_item_region = region[0]+x+45, region[1]+64, region[0]+159, region[1]+90
                 #img.screengrab_array(self.hwnd,current_item_region,True)
@@ -1975,7 +1975,7 @@ class Bot:
                 can_sell = img.lookForColor(self.hwnd, (192, 192, 192), current_item_region, 2, 2)
                 print("can sell: "+str(can_sell))
                 if (can_sell):
-                    click(self.hwnd,region[0]+x_ok + int(ok_w/2), region[1]+y_ok+int(ok_h/2))
+                    click_client(self.hwnd,region[0]+x_ok + int(ok_w/2), region[1]+y_ok+int(ok_h/2))
                     time.sleep(0.05)
                 else:
                     #counter += 1
@@ -2001,7 +2001,7 @@ class Bot:
         else:
             s = False
         if (cur_status != s):
-            click(self.hwnd,self.chat_status_region[0]+10, self.chat_status_region[1]+5)
+            click_client(self.hwnd,self.chat_status_region[0]+10, self.chat_status_region[1]+5)
     
     def sellAllNPC(self):    
         self.setChatStatus("on")
