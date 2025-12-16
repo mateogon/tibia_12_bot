@@ -50,7 +50,7 @@ class ModernBotGUI:
         bool_variables = [
             'loop', 'attack', 'attack_spells', 'hp_heal', 'mp_heal', 
             'manual_loot', 'cavebot', 'res', 'follow_party', 'use_area_rune', 
-            'manage_equipment', 'loot_on_spot', 'amp_res'
+            'manage_equipment', 'loot_on_spot', 'amp_res', 'show_area_rune_target'
         ]
         
         for var_name in bool_variables:
@@ -214,9 +214,16 @@ class ModernBotGUI:
         
         area_rune_switch = ctk.CTkSwitch(main_combat_frame, text="Use Area Rune", variable=self.traced_vars['use_area_rune'])
         area_rune_switch.grid(row=2, column=0, sticky="w", padx=10, pady=5)
+
+        area_rune_vis_switch = ctk.CTkSwitch(
+            main_combat_frame,
+            text="Show Rune Target",
+            variable=self.traced_vars['show_area_rune_target'],
+        )
+        area_rune_vis_switch.grid(row=2, column=1, sticky="w", padx=10, pady=5)
         
         res_switch = ctk.CTkSwitch(main_combat_frame, text="Exeta Res", variable=self.traced_vars['res'])
-        res_switch.grid(row=2, column=1, sticky="w", padx=10, pady=5)
+        res_switch.grid(row=3, column=1, sticky="w", padx=10, pady=5)
         
         amp_res_switch = ctk.CTkSwitch(main_combat_frame, text="Amp Res", variable=self.traced_vars['amp_res'])
         amp_res_switch.grid(row=3, column=0, sticky="w", padx=10, pady=5)

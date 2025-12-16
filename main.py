@@ -149,9 +149,11 @@ class Bot:
         self.spell_alternate = True
         self.last_attack_time = timeInMillis()
         self.normal_delay = getNormalDelay() #for randomness
-        self.exeta_res_time = time.time()
+        self.delays = DelayManager(default_jitter_ms_fn=getNormalDelay)
+        # Debounce auto-attack clicks so we don't spam-click before the red highlight appears
+        self.attack_click_delay_ms = 120
+        self.delays.set_default("attack_click", self.attack_click_delay_ms)
         self.exeta_res_cast_time = 3
-        self.amp_res_time = time.time()
         self.amp_res_cast_time = 6
         #configs
         self.mp_thresh = 30
@@ -172,11 +174,14 @@ class Bot:
         self.target_spells_slots = [7,8]
         self.check_spell_cooldowns = True
         self.utito_slot = 16
-        self.utito_time = 0
         self.use_utito = True
         self.use_area_rune = False
         self.area_rune_hotkey = 'F10'
         self.area_rune_slot = 9
+        # Area rune (2-click cast) delay + debug visualization
+        self.area_rune_delay_ms = 1100
+        self.area_rune_target_click_delay_s = 0.08
+        self.show_area_rune_target = True
         #try:
             #self.monsters_around_image = False#PhotoImage(file="monsters_around.png")
         #except:
@@ -203,15 +208,12 @@ class Bot:
         self.armor_slot = 19
         self.shield_slot = 22
         self.equipment_slots = [self.weapon_slot,self.helmet_slot,self.armor_slot,self.amulet_slot,self.ring_slot,self.shield_slot]#,]
-        self.last_equip_time = timeInMillis()
         self.slot_status = []
         for i in range(0,30):
             self.slot_status.append(False)
         #cavebot
         self.manual_loot = False
         self.lure = False
-        self.last_walk_time = timeInMillis()
-        self.last_lure_click_time = timeInMillis()
         self.kill_amount = 5
         self.kill_stop_amount = 1
         self.kill_stop_time = 120
@@ -239,8 +241,51 @@ class Bot:
         self.current_map_image = None
         #GUI
         self.GUI = ModernBotGUI(self, self.character_name, self.vocation)
-        self.last_follow_time = 0 
         self.follow_retry_delay = 2.5
+
+        # Centralized timers (seed throttles to avoid immediate spam on start)
+        self.delays.set_default("area_rune", self.area_rune_delay_ms, jitter_ms_fn=getNormalDelay)
+        self.delays.set_default("equip_cycle", 200)
+        self.delays.set_default("lure_stop", 250)
+        self.delays.set_default("follow_retry", int(self.follow_retry_delay * 1000))
+        self.delays.set_default("exeta_res", int(self.exeta_res_cast_time * 1000))
+        self.delays.set_default("amp_res", int(self.amp_res_cast_time * 1000))
+        self.delays.set_default("utito", 10_000)
+
+        self.delays.trigger("equip_cycle")
+        self.delays.trigger("lure_stop")
+        self.delays.trigger("walk", base_ms=200)
+        self.delays.trigger("exeta_res")
+        self.delays.trigger("amp_res")
+
+    def _bool_value(self, v):
+        try:
+            return bool(v.get())
+        except Exception:
+            return bool(v)
+
+    def _visualize_area_rune_target(self, rel_x, rel_y, neighbors_rel=None, radius_px=None):
+        if not self._bool_value(self.show_area_rune_target):
+            return
+        region = self.s_GameScreen.region
+        frame = img.screengrab_array(self.hwnd, region)
+        if frame is None:
+            return
+        vis = np.ascontiguousarray(frame, dtype=np.uint8)
+
+        x = int(rel_x)
+        y = int(rel_y)
+        cv2.drawMarker(vis, (x, y), (0, 0, 255), markerType=cv2.MARKER_CROSS, markerSize=20, thickness=2)
+        if radius_px is not None:
+            cv2.circle(vis, (x, y), int(radius_px), (255, 0, 0), 1)
+        if neighbors_rel:
+            for nx, ny in neighbors_rel:
+                if nx == 0 and ny == 0:
+                    continue
+                cv2.circle(vis, (int(nx), int(ny)), 3, (0, 255, 0), -1)
+
+        cv2.imshow("Area Rune Target", vis)
+        cv2.waitKey(1)
         
     def updateFrame(self):
         ok = self.bg.update()
@@ -817,17 +862,16 @@ class Bot:
         if (self.mppc <= thresh and self.hppc >= self.hp_thresh_low.get()):
             press(self.hwnd,self.mana_hotkey)
     def castExetaRes(self):
-        # Check time interval first
-        if time.time() - self.exeta_res_time > self.exeta_res_cast_time:
-            # Try to click. The function now checks visual cooldown internally.
-            if self.clickActionbarSlot(self.exeta_res_slot):
-                # Only update timer if click succeeded (was off cooldown)
-                self.exeta_res_time = time.time()
+        if not self.delays.due("exeta_res"):
+            return
+        if self.clickActionbarSlot(self.exeta_res_slot):
+            self.delays.trigger("exeta_res")
 
     def castAmpRes(self):
-        if time.time() - self.amp_res_time > self.amp_res_cast_time:
-            if self.clickActionbarSlot(self.amp_res_slot):
-                self.amp_res_time = time.time()
+        if not self.delays.due("amp_res"):
+            return
+        if self.clickActionbarSlot(self.amp_res_slot):
+            self.delays.trigger("amp_res")
 
     def haste(self):
         if self.slot_status[self.haste_slot]:
@@ -872,13 +916,14 @@ class Bot:
         return True
     
     def utito(self):
-        if time.time() - self.utito_time >= 10:
-            monster_count = self.monsterCount()
-            if monster_count >= 3:
-                if self.shouldUtito(monster_count):
-                    # Only reset timer if the click actually happened
-                    if self.clickActionbarSlot(self.utito_slot):
-                        self.utito_time = time.time()
+        if not self.delays.due("utito"):
+            return
+        monster_count = self.monsterCount()
+        if monster_count >= 3:
+            if self.shouldUtito(monster_count):
+                # Only reset timer if the click actually happened
+                if self.clickActionbarSlot(self.utito_slot):
+                    self.delays.trigger("utito")
 
     def shouldRes(self):
         b_x, b_y,_,b_y2 = self.s_BattleList.region
@@ -1005,6 +1050,8 @@ class Bot:
         # 1. Checks: Don't attack if already attacking or in PZ
         if self.isAttacking() or self.buffs.get('pz', False):
             return
+        if not self.delays.due("attack_click"):
+            return
 
         # 2. Capture the Battle List region
         region = self.s_BattleList.region
@@ -1041,6 +1088,7 @@ class Bot:
                 abs_y = region[1] + rel_y
                 
                 click_client(self.hwnd, abs_x, abs_y)
+                self.delays.trigger("attack_click")
                 
                 # Stop after clicking the first valid target
                 return
@@ -1199,6 +1247,8 @@ class Bot:
     def useAreaRune(self,test = False):
         if not test and (self.buffs['pz'] or self.monsterCount() <= 1):
             return
+        if not test and not self.delays.due("area_rune"):
+            return
         start = timeInMillis()
         #contours,opening = self.getMonstersAroundContours(9)
         #opening = cv2.cvtColor(opening,cv2.COLOR_GRAY2BGR)
@@ -1209,13 +1259,17 @@ class Bot:
         min_cont = False
         min_neighbors_list = []
         
-        for cur in self.monster_positions:
+        valid_positions = [p for p in self.monster_positions if p != (0, 0)]
+        if len(valid_positions) < 2:
+            return
+
+        for cur in valid_positions:
             neighbors_list = []
             # compute the center of the contour
             curX ,curY = cur
             neighbors_list.append((curX,curY))
-            for c in self.monster_positions:
-                if cur is c:
+            for c in valid_positions:
+                if cur == c:
                     continue
                 # compute the center of the contour
                 cX,cY = c
@@ -1242,11 +1296,17 @@ class Bot:
             if len(min_neighbors_list) > 1:
                 #pass
                 #offset = int(2*tile/3)
-                self.clickActionbarSlot(self.area_rune_slot)
-                #self.clickActionBar(self.hwnd,self.area_rune_hotkey)
-                #press(self.hwnd,self.area_rune_hotkey)
-                time.sleep(0.02)
-                click_client(self.hwnd,region[0]+x,region[1]+y)
+                self._visualize_area_rune_target(x, y, neighbors_rel=min_neighbors_list, radius_px=tile*tile_radius)
+
+                # Only click the ground if we successfully clicked the rune slot (otherwise we'd just walk)
+                if not self.isActionbarSlotSet(self.area_rune_slot):
+                    return
+                if not self.clickActionbarSlot(self.area_rune_slot):
+                    return
+
+                time.sleep(self.area_rune_target_click_delay_s)
+                click_client(self.hwnd, region[0] + x, region[1] + y)
+                self.delays.trigger("area_rune")
         #print(timeInMillis()-start)
     def walkAwayFromMonsters(self):
         region = self.s_GameScreen.region
@@ -1408,24 +1468,21 @@ class Bot:
                     self.updateLastAttackTime()
                     self.newNormalDelay()
     def manageEquipment(self):
+        if not self.delays.allow("equip_cycle"):
+            return
         monster_count = self.monsterCount()
-        if timeInMillis() - self.last_equip_time > 200:
-            for slot in self.equipment_slots:
-                if self.slot_status[slot]:
-                    if self.isActionbarSlotEnabled(slot):
-                        if monster_count == 0 :
-                            print("disabling ring")
-                            self.clickActionbarSlot(slot)
-                            #press(self.hwnd,self.ring_hotkey)
-                            time.sleep(0.05)
-                    else:
-                        if monster_count > 0:
-                            print("enabling ring")
-                            self.clickActionbarSlot(slot)
-                            #self.last_equip_time = timeInMillis()
-                            #press(self.hwnd,self.ring_hotkey)
-                            time.sleep(0.05)
-            self.last_equip_time = timeInMillis()
+        for slot in self.equipment_slots:
+            if self.slot_status[slot]:
+                if self.isActionbarSlotEnabled(slot):
+                    if monster_count == 0 :
+                        print("disabling ring")
+                        self.clickActionbarSlot(slot)
+                        time.sleep(0.05)
+                else:
+                    if monster_count > 0:
+                        print("enabling ring")
+                        self.clickActionbarSlot(slot)
+                        time.sleep(0.05)
             
     def isFollowing(self):
         x1, y1, x2, y2 = self.s_Party.region
@@ -1447,7 +1504,7 @@ class Bot:
             return
         print("[DEBUG] Not currently following.")
         # 2. Check Cooldown (Prevents spamming)
-        if time.time() - self.last_follow_time < self.follow_retry_delay:
+        if not self.delays.due("follow_retry"):
             return
 
         # 3. Don't interrupt attack unless necessary
@@ -1460,13 +1517,12 @@ class Bot:
         # 4. Attempt to follow
         self.getPartyList() # Refresh positions
         
-        if self.followLeader():
+        ok = self.followLeader()
+        self.delays.trigger("follow_retry")
+        if ok:
             print(f"[DEBUG] Follow clicked. Waiting {self.follow_retry_delay}s to verify...")
-            self.last_follow_time = time.time()
         else:
             print("[DEBUG] Could not find leader to follow.")
-            # Reset time so it retries on next loop if it failed immediately (optional, or keep delay)
-            self.last_follow_time = time.time()
     
     def followLeader(self):
         leader_name = self.party_leader.get()
@@ -1657,10 +1713,9 @@ class Bot:
                 self.kill_start_time = time.time()
             elif monster_count >= self.lure_amount and self.lure:
                 walk_delay = 500
-                if timeInMillis() - self.last_lure_click_time > 250:
+                if self.delays.allow("lure_stop"):
                     print("luring")
                     self.clickStop()
-                    self.last_lure_click_time = timeInMillis()
             if len(marks) == 0:
                 #print("no "+self.current_mark+ " mark found, changing to the next one")
                 self.nextMark()
@@ -1672,12 +1727,12 @@ class Bot:
                     self.updatePreviousMarks()
                     self.nextMark()
                 else:
-                    if timeInMillis() - self.last_walk_time > walk_delay:
+                    if self.delays.allow("walk", base_ms=walk_delay):
 
                         #print(str(walk_delay))
                         print("clicking mark")
                         click_client(self.hwnd,pos[0],pos[1])
-                        self.last_walk_time = timeInMillis()
+                        
 
     def cavebot_distance(self):
         marks = self.getClosestMarks()
@@ -1691,7 +1746,7 @@ class Bot:
             print("stopping attack")
             walk = True
         else:
-            time_passed = timeInMillis() - self.last_walk_time
+            time_passed = self.delays.elapsed_ms("walk")
             if time_passed > 100 and time_passed < 500 and monster_count >= 2:
                 print("clicking stop")
                 self.clickStop()
@@ -1712,12 +1767,12 @@ class Bot:
             self.updatePreviousMarks()
             self.nextMark()
         else:
-            if walk and timeInMillis() - self.last_walk_time > walk_delay:
+            if walk and self.delays.allow("walk", base_ms=walk_delay):
                 print("walking")
             #print(str(walk_delay))
             #print("clicking mark")
                 click_client(self.hwnd,pos[0],pos[1])
-                self.last_walk_time = timeInMillis()
+                
     def clickStop(self):
         region = self.s_Stop.getCenter()
         click_client(self.hwnd,region[0],region[1])                     
