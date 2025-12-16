@@ -122,11 +122,12 @@ class Bot:
         self.player_list = {}
         self.player_list["Mateogon"] = {"vocation" :"sorcerer", "spell_area" : 6}
         self.player_list["Mateo Gon"] = {"vocation" :"knight", "spell_area" : 3}
-        self.player_list["Master Liqui"] = {"vocation" :"knight", "spell_area" : 6}
+        self.player_list["Master Liqui"] = {"vocation" :"knight", "spell_area" : 4}
         self.player_list["Thyrion"] = {"vocation" :"paladin", "spell_area" : 5}
         self.player_list["Zane"] = {"vocation" :"sorcerer", "spell_area" : 3}
         self.player_list["Helios"] = {"vocation" :"paladin", "spell_area" : 6}
         self.player_list["Kaz"] = {"vocation" :"druid", "spell_area" : 6}
+        self.player_list["Master"] = {"vocation" :"druid", "spell_area" : 6}
         self.party_leader = "Master Liqui"
         self.vocation = self.player_list[self.character_name]["vocation"]
         self.party = {}
@@ -169,7 +170,7 @@ class Bot:
         self.area_spells_slots = [4,5,6]
         self.target_spells_hotkeys = ['F8','F9']
         self.target_spells_slots = [7,8]
-        self.check_spell_cooldowns = False
+        self.check_spell_cooldowns = True
         self.utito_slot = 16
         self.utito_time = 0
         self.use_utito = True
@@ -211,7 +212,7 @@ class Bot:
         self.lure = False
         self.last_walk_time = timeInMillis()
         self.last_lure_click_time = timeInMillis()
-        self.kill_amount = 777
+        self.kill_amount = 5
         self.kill_stop_amount = 1
         self.kill_stop_time = 120
         self.lure_amount = 2
@@ -1039,7 +1040,6 @@ class Bot:
                 abs_x = region[0] + rel_x
                 abs_y = region[1] + rel_y
                 
-                print(f"clicking attack at: {(abs_x, abs_y)}")
                 click_client(self.hwnd, abs_x, abs_y)
                 
                 # Stop after clicking the first valid target
@@ -1239,13 +1239,13 @@ class Bot:
             y = int(y)
             #cv2.circle(opening,(x,y), int(tile*tile_radius), (0,0,255), 2)
             #img.visualize_fast(opening)
-            if len(min_neighbors_list) > 2:
+            if len(min_neighbors_list) > 1:
                 #pass
                 #offset = int(2*tile/3)
                 self.clickActionbarSlot(self.area_rune_slot)
                 #self.clickActionBar(self.hwnd,self.area_rune_hotkey)
                 #press(self.hwnd,self.area_rune_hotkey)
-                time.sleep(0.005)
+                time.sleep(0.02)
                 click_client(self.hwnd,region[0]+x,region[1]+y)
         #print(timeInMillis()-start)
     def walkAwayFromMonsters(self):
@@ -1369,9 +1369,13 @@ class Bot:
                     self.castExetaRes()
                 if self.amp_res.get():
                     #print("")
-                    if self.monsters_around < self.monster_count:
-                        
+                    monsters_in_melee = self.getMonstersAround(3, False, False)
+                    print("monsters in melee: "+str(monsters_in_melee) + " / "+ str(self.monster_count))
+                    # If we have 5 mobs in Battle List, but only 3 in Melee range -> Cast!
+                    if monsters_in_melee < self.monster_count:
+                        print("casting amp res")
                         self.castAmpRes()
+                        
                 times[4] = timeInMillis()
                 if (self.kill and self.cavebot.get()) or self.monsters_around >= self.min_monsters_around_spell.get() :#or self.checkMonsterQueue():
                     for i in range(0,len(self.area_spells_hotkeys)):
@@ -1663,16 +1667,15 @@ class Bot:
             else:
                 index = 0
                 dist, pos, _ = marks[index]  # Unpack 3 values and ignore the third one
-                print("distance to mark: "+str(dist))
-                print("pos mark: "+str(pos))
                 if dist <= 3:
                     #print("reached current mark")
                     self.updatePreviousMarks()
                     self.nextMark()
                 else:
                     if timeInMillis() - self.last_walk_time > walk_delay:
+
                         #print(str(walk_delay))
-                        #print("clicking mark")
+                        print("clicking mark")
                         click_client(self.hwnd,pos[0],pos[1])
                         self.last_walk_time = timeInMillis()
 
@@ -1763,15 +1766,16 @@ class Bot:
                     
                     # --- 1. VISUALIZATION / DISTANCE POINT (True Center) ---
                     # We use this for Distance calculation and Visualization lines.
-                    # It represents the geometric center of the mark.
                     vis_x = int(pos[0] + (w / 2))
                     vis_y = int(pos[1] + (h / 2))
                     
                     # --- 2. CLICK POINT (Action Anchor) ---
-                    # We use this ONLY for clicking. 
-                    # It represents the clickable bottom-right area of the tile.
-                    click_x = int(pos[0] + w + 3)
-                    click_y = int(pos[1] + h - 1)
+                    # FIX: Changed from (w + 3, h - 1) to Center to match visualization
+                    # Old: click_x = int(pos[0] + w + 3)
+                    # Old: click_y = int(pos[1] + h - 1)
+                    
+                    click_x = int(pos[0] + (w / 2))
+                    click_y = int(pos[1] + (h / 2))
                     
                     # Absolute coords for clicking
                     click_abs = (map_region[0] + click_x, map_region[1] + click_y)
@@ -1794,7 +1798,7 @@ class Bot:
         try:
             if not isinstance(previous, bool):
                 prev_x, prev_y, w, h = previous
-                prev_center = (int(prev_x + w/2 - img.left), int(prev_y + h/2 - img.top))
+                prev_center = (int(prev_x + w/2), int(prev_y + h/2))
                 cv2.line(map_image_np, map_relative_center, prev_center, (0, 0, 255), 1) 
             
             for i, (_, _, vis_point) in enumerate(result):

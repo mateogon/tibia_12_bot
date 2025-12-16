@@ -72,6 +72,35 @@ def screengrab_array(hwnd,area, show=False):
         visualize(im)
     return(im)
 
+def screengrab_array_screen(hwnd, region_client):
+    """
+    Fallback capture: grabs from the desktop (screen) using MSS.
+    region_client is (x1,y1,x2,y2) in CLIENT coords of hwnd.
+    Returns BGR np.ndarray or None.
+    Works only if window is visible (not minimized) and not covered.
+    """
+    try:
+        import mss
+
+        x1, y1, x2, y2 = region_client
+        if x2 <= x1 or y2 <= y1:
+            return None
+
+        # client -> screen
+        sx1, sy1 = win32gui.ClientToScreen(hwnd, (x1, y1))
+        sx2, sy2 = win32gui.ClientToScreen(hwnd, (x2, y2))
+        w = sx2 - sx1
+        h = sy2 - sy1
+        if w <= 0 or h <= 0:
+            return None
+
+        with mss.mss() as sct:
+            mon = {"left": int(sx1), "top": int(sy1), "width": int(w), "height": int(h)}
+            shot = np.array(sct.grab(mon))  # BGRA
+            bgr = shot[:, :, :3]            # BGR
+            return np.ascontiguousarray(bgr, dtype=np.uint8)
+    except Exception:
+        return None
 def visualize(img):
     cv2.imshow('im', img)
     if (cv2.waitKey(0) & 0xFF):
