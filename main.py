@@ -1174,11 +1174,7 @@ class Bot:
         self.party_positions = party_positions
     #@timeit
     def updateMonsterPositions(self, test=False):
-        """
-        New logic using Black Bar detection from detect_monsters.py
-        """
         # 1. Capture the standard Game Screen region
-        # We no longer need 'getNamesArea' or downscaling ratios.
         region = self.s_GameScreen.region
         image = img.screengrab_array(self.hwnd, region)
         
@@ -1186,43 +1182,40 @@ class Bot:
             self.monster_positions = []
             return
 
-        # 2. Run the detection
-        # This returns [(x, y), ...] relative to the image
+        # 2. Run the detection (Returns feet coordinates)
         raw_positions = dm.detect_monsters(image)
         
         monster_positions = []
         
         # 3. Filter out Party Members
-        # We compare the detected Name center against known Party member positions.
+        # We assume Party Detection uses Sprite Center (Feet).
+        # Our new detection ALSO targets Feet.
+        # So we can use a tight distance check.
         for (mx, my) in raw_positions:
             is_party = False
             for player in self.party_positions:
-                px, py = player[0] # px, py are relative to the GameScreen
-                is_leader = player[1]
+                px, py = player[0] 
                 
-                # Calculate distance between detected Monster Name and Party Sprite Center
-                # Note: Party detection finds the SPRITE (feet/body). 
-                # Monster detection finds the NAME (head).
-                # There is a vertical distance naturally (~30px). 
-                # We use Euclidean distance < 45 to be safe.
+                # Simple distance check between feet
                 dist = sqrt((px - mx)**2 + (py - my)**2)
                 
                 if dist < 45: 
                     is_party = True
                     if test:
-                        # Draw blue on party members for debug
+                        # Draw BLUE for Party
                         cv2.circle(image, (mx, my), 5, (255, 0, 0), -1)
                     break
             
             if not is_party:
                 monster_positions.append((mx, my))
                 if test:
-                    # Draw green on valid monsters
+                    # Draw GREEN for Monsters
                     cv2.circle(image, (mx, my), 5, (0, 255, 0), -1)
 
         self.monster_positions = monster_positions
         
         if test:
+            # Show the live debug window
             img.visualize_fast(image)
 
     def get_training_positions(self):
@@ -2179,7 +2172,7 @@ if __name__ == "__main__":
         times[1] = timeInMillis()
         if bot.monsterCount() > 0:
             #print("monster count: "+str(bot.monsterCount()))
-            bot.updateMonsterPositions(test=True)
+            bot.updateMonsterPositions()
         times[2] = timeInMillis()
         #bot.getMonstersAround(bot.areaspell_area,False,False)
         #if len(bot.party.keys()) > 0:w

@@ -12,7 +12,7 @@ MATCH_DISTANCE = 25
 
 # --- TUNING ---
 # 1. Bar Width: 31px usually. We accept > 20.
-MIN_BAR_WIDTH = 20 
+MIN_BAR_WIDTH = 28 
 
 # 2. Border Gap: The top and bottom black lines of ONE bar are ~4px apart.
 BORDER_MERGE_DIST = 8 
