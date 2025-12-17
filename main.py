@@ -25,7 +25,6 @@ import image as img
 from screen_elements import *
 from window_interaction import *
 from extras import *
-from client_manager import *
 from choose_client_gui import choose_capture_window
 from main_GUI import *
 from tkinter import BooleanVar,StringVar,IntVar,PhotoImage
@@ -1047,6 +1046,7 @@ class Bot:
         Scans the Battle List for a valid target (Black Pixel check).
         Optimized to use a single screenshot + NumPy array lookup.
         """
+        
         # 1. Checks: Don't attack if already attacking or in PZ
         if self.isAttacking() or self.buffs.get('pz', False):
             return
@@ -1067,7 +1067,7 @@ class Bot:
         rel_x = 25
         start_y = 30
         step_y = 22
-
+        print("clickAttack called - before loop")
         # 4. Iterate through the slots using the image array
         for rel_y in range(start_y, height, step_y):
             
@@ -1086,7 +1086,7 @@ class Bot:
                 # Calculate Absolute Screen Coordinates for the click
                 abs_x = region[0] + rel_x
                 abs_y = region[1] + rel_y
-                
+                print("Clicking target at:", abs_x, abs_y)
                 click_client(self.hwnd, abs_x, abs_y)
                 self.delays.trigger("attack_click")
                 
