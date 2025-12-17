@@ -22,7 +22,10 @@ class ModernBotGUI:
         # Variable Storage
         self.vars = {}
         self._init_variables()
-        
+        # CONTROL FLAGS
+        self.running = True           # Master flag for the GUI state
+        self._map_timer_id = None     # To track and cancel the map loop
+        self._preview_timer = None    # To track and cancel the slot preview
         # --- FIX: Initialize Image References & Timer ---
         self.map_tk_image = None
         self.map_label = None
@@ -34,7 +37,7 @@ class ModernBotGUI:
         self._build_ui()
 
         # Start Loops
-        self.root.after(500, self._update_map_loop)
+        self._update_map_loop()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _init_variables(self):
@@ -233,7 +236,22 @@ class ModernBotGUI:
 
     def _build_cavebot_tab(self, parent):
         f_nav = self._create_section(parent, "Navigation")
-        self._switch(f_nav, "Enable Cavebot Walker", "cavebot")
+        
+        # --- Custom Row: Cavebot Switch + Reset Button ---
+        row_frame = ctk.CTkFrame(f_nav, fg_color="transparent")
+        row_frame.pack(fill="x", padx=10, pady=5)
+        
+        # Switch on the Left
+        cb_switch = ctk.CTkSwitch(row_frame, text="Enable Cavebot Walker", variable=self.vars['cavebot'])
+        cb_switch.pack(side="left")
+        
+        # Reset Button on the Right
+        reset_btn = ctk.CTkButton(row_frame, text="Reset History", width=100, height=24,
+                                  fg_color="#D2691E", hover_color="#A0522D", # Orange/Brown style
+                                  command=self.bot.reset_marks_history)
+        reset_btn.pack(side="right")
+        # -------------------------------------------------
+
         self._switch(f_nav, "Follow Party Leader", "follow_party")
         self._entry_row(f_nav, "Party Leader Name:", "party_leader")
 
@@ -448,24 +466,64 @@ class ModernBotGUI:
 
     # --- MAP LOOP ---
     def _update_map_loop(self):
-        if self.bot.loop and hasattr(self.bot, "current_map_image"):
-            if self.bot.current_map_image is not None:
+        # 1. Stop immediately if we are shutting down
+        if not self.running: 
+            return
+
+        # 2. Logic (Safe Check)
+        if hasattr(self.bot, "current_map_image") and self.bot.current_map_image is not None:
+            try:
                 cv_img = cv2.cvtColor(self.bot.current_map_image, cv2.COLOR_BGR2RGB)
-                img_pil = Image.fromarray(cv_img)
+                pil_img = Image.fromarray(cv_img)
                 
-                h = self.map_label.winfo_height() or 300
-                w = self.map_label.winfo_width() or 300
-                img_pil = img_pil.resize((w, h), Image.Resampling.NEAREST)
-                
-                ctk_img = ctk.CTkImage(light_image=img_pil, dark_image=img_pil, size=(w, h))
-                self.map_label.configure(image=ctk_img, text="")
-        
-        self.root.after(200, self._update_map_loop)
+                # Check widget existence before asking for height/width
+                if self.map_label.winfo_exists():
+                    h = self.map_label.winfo_height() or 300
+                    w = self.map_label.winfo_width() or 300
+                    pil_img = pil_img.resize((w, h), Image.Resampling.NEAREST)
+                    ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(w, h))
+                    self.map_label.configure(image=ctk_img, text="")
+            except Exception:
+                pass # Ignore resize errors during shutdown
+
+        # 3. Schedule next run AND save the ID
+        if self.running:
+            self._map_timer_id = self.root.after(200, self._update_map_loop)
 
     def _on_close(self):
+        print("[GUI] Shutting down...")
+        
+        # 1. Stop logical loops
+        self.running = False
         self.bot.loop.set(False)
-        self.root.destroy()
-        exit()
+        
+        # 2. Cancel our own timers (Polite cleanup)
+        if self._map_timer_id: 
+            try: self.root.after_cancel(self._map_timer_id)
+            except: pass
+            
+        if self._preview_timer: 
+            try: self.root.after_cancel(self._preview_timer)
+            except: pass
+        
+        # 3. Destroy the window
+        try:
+            self.root.destroy()
+        except:
+            pass
+
+        # 4. HARD EXIT (The Fix)
+        # This kills the process instantly, preventing CustomTkinter's 
+        # internal animation callbacks from firing on a dead window.
+        import os
+        os._exit(0)
 
     def loop(self):
-        self.root.update()
+        if not self.running:
+            return
+        try:
+            self.root.update()
+        except Exception:
+            # If the window is dead, stop trying
+            self.running = False
+            self.bot.loop.set(False)

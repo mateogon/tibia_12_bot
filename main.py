@@ -231,7 +231,7 @@ class Bot:
         self.amulet_slot = 20
         self.ring_slot = 21
         self.equipment_slots = [self.weapon_slot, self.helmet_slot, self.armor_slot, self.amulet_slot, self.ring_slot, self.shield_slot]
-        
+        self.magic_shield_enabled = False
         self.slot_status = [False] * 30
         
         # Cavebot defaults
@@ -1861,6 +1861,14 @@ class Bot:
                     if self.delays.allow("walk", base_ms=walk_delay):
                         click_client(self.hwnd,pos[0],pos[1])
                         
+    def reset_marks_history(self):
+        """Manually clears the 'visited' status of map marks."""
+        print("[CAVEBOT] Resetting mark history. All marks are now fresh.")
+        for mark in self.mark_list:
+            self.previous_marks[mark] = False
+        # Optional: Reset index to start from the beginning of the list
+        self.current_mark_index = 0
+        self.current_mark = self.mark_list[0]
 
     def cavebot_distance(self):
         marks = self.getClosestMarks()
@@ -2197,7 +2205,10 @@ if __name__ == "__main__":
     start_time = time.time()
     calibrate = False
     while(True): 
-        #time.sleep(1)
+        # Check if GUI signaled exit
+        if not bot.loop.get():
+            break
+            
         bot.GUI.loop()
         bot.updateFrame()
         bot.updateWindowCoordinates()
