@@ -46,17 +46,17 @@
                 "weapon": 17,
                 "helmet": 16,
                 "armor": 18,
-                "shield": 21
+                "shield": 21,
+                "area_rune": 5
             },
             "spells": {
                 "area_slots": [
-                    3,
                     4,
-                    5
+                    5,
+                    6
                 ],
                 "target_slots": [
-                    6,
-                    7
+                    8
                 ]
             },
             "settings": {
@@ -67,7 +67,11 @@
                 "res": true,
                 "use_utito": true,
                 "min_monsters_spell": 2,
-                "min_monsters_rune": 1
+                "min_monsters_rune": 1,
+                "use_area_rune": false,
+                "amp_res": false,
+                "kill_amount": 5,
+                "kill_stop_amount": 1
             }
         },
         "druid": {

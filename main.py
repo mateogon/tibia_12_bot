@@ -51,9 +51,7 @@ class Bot:
         client_rect = win32gui.GetClientRect(self.hwnd)
         self.width = client_rect[2]
         self.height = client_rect[3]
-        print("width: "+str(self.width) + " height: "+str(self.height))
         self.left, self.top, self.right, self.bottom = win32gui.GetWindowRect(self.hwnd)
-        print("left: "+str(self.left) + " top: "+str(self.top) + " right: "+str(self.right) + " bottom: "+str(self.bottom))
 
         #self.height = abs(self.bottom - self.top)
         #self.width = abs(self.right - self.left)
@@ -61,7 +59,7 @@ class Bot:
         #light green (96,192,96)
         #yellow (192,192,0)
         #light red (192, 0, 0)
-        #red (192, 48, 48)
+        #red (192, 48, 48)f
         #dark red (96, 0, 0)
         
         self.hp_colors =((0, 192, 0),(96,192,96),(192,192,0),(192, 0, 0),(192, 48, 48),(96, 0, 0),(192, 192, 192))
@@ -154,13 +152,13 @@ class Bot:
         s = self.preset["settings"]
         
         # -- Thresholds --
-        self.hp_thresh_high = s.get("hp_thresh_high", 90)
-        self.hp_thresh_low = s.get("hp_thresh_low", 70)
-        self.mp_thresh = s.get("mp_thresh", 30)
+        self.hp_thresh_high = int(s.get("hp_thresh_high", 90))
+        self.hp_thresh_low = int(s.get("hp_thresh_low", 70))
+        self.mp_thresh = int(s.get("mp_thresh", 30))
         
         # -- Combat Logic --
-        self.min_monsters_around_spell = s.get("min_monsters_spell", 1)
-        self.min_monsters_for_rune = s.get("min_monsters_rune", 1)
+        self.min_monsters_around_spell = int(s.get("min_monsters_spell", 1))
+        self.min_monsters_for_rune = int(s.get("min_monsters_rune", 1))
         self.attack_spells = s.get("attack_spells", True)
         self.res = s.get("res", False)
         self.amp_res = s.get("amp_res", False)
@@ -422,18 +420,28 @@ class Bot:
         return False
     def checkGameScreenMoved(self, color_min=(14,14,14), color_max=(28,28,28)):
         """
-        Checks if the bottom-left pixel of the current gamescreen region is still within the border color range.
-        Returns True if the screen moved/changed (pixel is NOT in range), False if it stayed.
+        Checks if the game screen has moved.
+        Ignores pure black (0,0,0) which indicates a background/minimized capture failure.
         """
         # Get bottom-left corner pixel of the current gamescreen region
         x = self.s_GameScreen.region[0]      # left
-        y = self.s_GameScreen.region[3] -1  # bottom (y2 is exclusive)
+        y = self.s_GameScreen.region[3] -1   # bottom (y2 is exclusive)
+        
         pixel = img.GetPixelRGBColor(self.hwnd, (x, y))
+        
+        # --- FIX: Ignore Black Screen (Background/Minimized) ---
+        if pixel == (0, 0, 0):
+            # print("[DEBUG] Screen is black. Skipping resize check.")
+            return False 
+
         # Check if pixel is in the expected color range
         in_range = all(color_min[i] <= pixel[i] <= color_max[i] for i in range(3))
-        print(f"[DEBUG] Bottom-left pixel at ({x},{y}) = {pixel}, in_range = {in_range}")
-
-        return not in_range  # True if moved, False if not moved
+        
+        if not in_range:
+            print(f"[RESIZE] Point ({x}, {y}) LOST border. Got {pixel}")
+            return True # True = Moved/Resized
+            
+        return False # False = Stable
 
     def updateChatStatusButtonRegion(self):
         #region = (self.width-300, self.height-30, self.width-100, self.height)
@@ -861,7 +869,6 @@ class Bot:
         self.hp_queue.pop()
         self.hp_queue.appendleft(self.hppc)
         burst = self.getBurstDamage()
-        
         # Use SLOTS instead of Key Press
         if (self.hppc <= self.hp_thresh_low.get() or burst > 40):
             # Check if slot exists in config
@@ -1552,7 +1559,6 @@ class Bot:
             # Condition: Kill Mode OR Enough Monsters
             should_aoe = (self.kill and self.cavebot.get()) or \
                          (self.monsters_around >= self.min_monsters_around_spell.get())
-
             if should_aoe:
                 # Iterate through the list of Area Spell Slots (F5, F6, etc.)
                 for slot in self.area_spells_slots:
@@ -1586,7 +1592,12 @@ class Bot:
                         self.newNormalDelay()
                         return
 
-
+    def get_slot_image(self, pos):
+        """Helper for GUI to visualize slots"""
+        x, y = self.getActionbarSlotPosition(pos)
+        region = (x, y, x + 34, y + 34)
+        return img.screengrab_array(self.hwnd, region)
+    
     def manageEquipment(self):
         if not self.delays.allow("equip_cycle"):
             return
@@ -2240,9 +2251,9 @@ if __name__ == "__main__":
         if bot.attack.get():
             bot.clickAttack()
         times[5] = timeInMillis()
-        if bot.use_utito:
-            if bot.vocation == "knight":
-                bot.utito()
+        #if bot.use_utito:
+        #    if bot.vocation == "knight":
+        #        bot.utito()
         if bot.attack_spells.get():
             bot.attackSpells()
         times[6] = timeInMillis()
