@@ -224,12 +224,12 @@ class Bot:
         self.safe_mp_thresh = self.mp_thresh + 15
         
         # Equipment Slot Definitions (Fixed by Game Client)
-        self.weapon_slot = 18
-        self.helmet_slot = 17
-        self.armor_slot = 19
-        self.shield_slot = 22
-        self.amulet_slot = 20
-        self.ring_slot = 21
+        self.weapon_slot = self.slots.get("weapon", 18)
+        self.helmet_slot = self.slots.get("helmet", 17)
+        self.armor_slot = self.slots.get("armor", 19)
+        self.shield_slot = self.slots.get("shield", 22)
+        self.amulet_slot = self.slots.get("amulet", 20)
+        self.ring_slot = self.slots.get("ring", 21)
         self.equipment_slots = [self.weapon_slot, self.helmet_slot, self.armor_slot, self.amulet_slot, self.ring_slot, self.shield_slot]
         self.magic_shield_enabled = False
         self.slot_status = [False] * 30
@@ -856,12 +856,12 @@ class Bot:
     def manageMagicShield(self):
         if self.vocation == "druid" or self.vocation == "sorcerer":
             if self.hppc <= self.hp_thresh_low.get() or self.getBurstDamage() > 40:
-                if self.slot_status[self.magic_shield_slot] and not self.magic_shield_enabled:
-                    self.clickActionbarSlot(self.magic_shield_slot)
+                if self.slot_status[self.slots.get("magic_shield")] and not self.magic_shield_enabled:
+                    self.clickActionbarSlot(self.slots.get("magic_shield"))
                     self.magic_shield_enabled = True
             else:
                 if self.magic_shield_enabled and self.monsterCount() == 0:
-                    self.clickActionbarSlot(self.cancel_magic_shield_slot)
+                    self.clickActionbarSlot(self.slots.get("cancel_magic_shield"))
                     self.magic_shield_enabled = False
     
     def manageHealth(self):
@@ -956,7 +956,7 @@ class Bot:
         if monster_count >= 3:
             if self.shouldUtito(monster_count):
                 # Only reset timer if the click actually happened
-                if self.clickActionbarSlot(self.utito_slot):
+                if self.clickActionbarSlot(self.slots.get("utito")):
                     self.delays.trigger("utito")
 
     def shouldRes(self):
@@ -1340,7 +1340,7 @@ class Bot:
 
         print(f"[DATA] Saved {img_filename} with {len(name_positions)} name labels.")
         
-    def useAreaRune(self, test=False):
+    def useAreaRunePrev(self, test=False):
         # 1. Get the SPECIFIC threshold for runes
         min_monsters = self.min_monsters_for_rune.get()
 
@@ -1407,7 +1407,7 @@ class Bot:
 
                 if not test:
                     # 1. Click Rune Hotkey
-                    if not self.clickActionbarSlot(self.area_rune_slot):
+                    if not self.clickActionbarSlot(self.slots.get("area_rune")):
                         return
                     
                     # 2. Click Game Screen (Global Coordinates)
@@ -1591,7 +1591,135 @@ class Bot:
                         self.updateLastAttackTime()
                         self.newNormalDelay()
                         return
+    
+    def attackAreaSpells(self):
+        """
+        Attempts to cast Area Spells (Waves, UE).
+        Returns True if a spell was cast (triggered GCD).
+        """
+        # 1. Safety & Cooldown Checks
+        if self.buffs.get('pz', False) or self.monsterCount() == 0:
+            return False
+            
+        # Check explicit delay (Global Cooldown)
+        cur_sleep = timeInMillis() - self.last_attack_time
+        if (timeInMillis() - cur_sleep <= (100 + self.normal_delay)):
+            return False
 
+        # 2. Check Conditions
+        # Use the configured area (e.g. 6 for Mages, 3 for Knights)
+        self.monsters_around = self.getMonstersAround(self.areaspell_area, True, True)
+        
+        # Check threshold (e.g. 5+ for UE)
+        if self.monsters_around < self.min_monsters_around_spell.get():
+            return False
+
+        # 3. Attempt Cast
+        for slot in self.area_spells_slots:
+            if self.check_spell_cooldowns:
+                if self.checkActionBarSlotCooldown(slot):
+                    if self.clickActionbarSlot(slot):
+                        self.updateLastAttackTime()
+                        self.newNormalDelay()
+                        print(f"[COMBAT] Cast Area Spell (Slot {slot})")
+                        return True
+            else:
+                self.clickActionbarSlot(slot)
+                self.updateLastAttackTime()
+                self.newNormalDelay()
+                return True
+                
+        return False
+
+    def useAreaRune(self, test=False):
+        """
+        Calculates clusters and throws runes (GFB/Ava).
+        Returns True if a rune was thrown.
+        """
+        min_monsters = self.min_monsters_for_rune.get()
+
+        if not test:
+            if self.buffs.get('pz', False): return False
+            if self.monsterCount() < min_monsters: return False
+            # Check internal Rune Timer AND Global Cooldown (Runes share group CD)
+            if not self.delays.due("area_rune"): return False
+            
+            # Don't rune if we just cast a spell (GCD protection)
+            cur_sleep = timeInMillis() - self.last_attack_time
+            if (timeInMillis() - cur_sleep <= (100 + self.normal_delay)):
+                return False
+
+        # --- Clustering Logic (Same as before) ---
+        region = self.s_GameScreen.region
+        tile = self.s_GameScreen.tile_w
+        tile_radius = 3
+        
+        valid_positions = [p for p in self.monster_positions if p != (0, 0)]
+        if len(valid_positions) < min_monsters: return False
+
+        best_center = None
+        best_neighbors = []
+
+        for center_candidate in valid_positions:
+            curX, curY = center_candidate
+            neighbors = []
+            for potential in valid_positions:
+                pX, pY = potential
+                dist = sqrt((pX - curX)**2 + (pY - curY)**2)
+                if dist <= (tile * tile_radius):
+                    neighbors.append((pX, pY))
+            
+            if len(neighbors) > len(best_neighbors):
+                best_neighbors = neighbors
+                best_center = center_candidate
+                if len(best_neighbors) >= 5: break
+        
+        if best_center is not None:
+            if len(best_neighbors) >= min_monsters:
+                avg_x = sum([n[0] for n in best_neighbors]) / len(best_neighbors)
+                avg_y = sum([n[1] for n in best_neighbors]) / len(best_neighbors)
+                final_x = int(avg_x)
+                final_y = int(avg_y)
+
+                self._visualize_area_rune_target(final_x, final_y, neighbors_rel=best_neighbors, radius_px=tile*tile_radius)
+
+                if not test:
+                    if not self.clickActionbarSlot(self.slots.get("area_rune")):
+                        return False
+                    
+                    click_client(self.hwnd, region[0] + final_x, region[1] + final_y)
+                    self.delays.trigger("area_rune")
+                    # Update attack time because Runes trigger a 2s Group CD
+                    self.updateLastAttackTime() 
+                    print(f"[COMBAT] Fired Area Rune on {len(best_neighbors)} targets.")
+                    return True
+        return False
+
+    def attackTargetSpells(self):
+        """
+        Standard single target rotation (Exori Vis, etc).
+        """
+        if self.buffs.get('pz', False) or self.monsterCount() == 0: return
+
+        cur_sleep = timeInMillis() - self.last_attack_time
+        if (timeInMillis() - cur_sleep <= (100 + self.normal_delay)):
+            return
+
+        # Only cast if we have at least 1 monster
+        if self.monsters_around >= 1:
+            for slot in self.target_spells_slots:
+                if self.check_spell_cooldowns:
+                    if self.checkActionBarSlotCooldown(slot):
+                        if self.clickActionbarSlot(slot):
+                            self.updateLastAttackTime()
+                            self.newNormalDelay()
+                            return
+                else:
+                    self.clickActionbarSlot(slot)
+                    self.updateLastAttackTime()
+                    self.newNormalDelay()
+                    return
+                
     def get_slot_image(self, pos):
         """Helper for GUI to visualize slots"""
         x, y = self.getActionbarSlotPosition(pos)
@@ -1601,18 +1729,29 @@ class Bot:
     def manageEquipment(self):
         if not self.delays.allow("equip_cycle"):
             return
+            
         monster_count = self.monsterCount()
-        for slot in self.equipment_slots:
-            if self.slot_status[slot]:
-                if self.isActionbarSlotEnabled(slot):
-                    if monster_count == 0 :
-                        print("disabling ring")
-                        self.clickActionbarSlot(slot)
+        
+        # Define the keys we care about
+        equip_keys = ["weapon", "helmet", "armor", "amulet", "ring", "shield"]
+        
+        for key in equip_keys:
+            slot_id = self.slots.get(key)
+            if slot_id is None: continue
+            
+            # Use safe access to slot_status
+            if slot_id < len(self.slot_status) and self.slot_status[slot_id]:
+                if self.isActionbarSlotEnabled(slot_id):
+                    # Item is equipped/active. Unequip if safe.
+                    if monster_count == 0:
+                        # print(f"Disabling {key}")
+                        self.clickActionbarSlot(slot_id)
                         time.sleep(0.05)
                 else:
+                    # Item is unequipped. Equip if fighting.
                     if monster_count > 0:
-                        print("enabling ring")
-                        self.clickActionbarSlot(slot)
+                        # print(f"Enabling {key}")
+                        self.clickActionbarSlot(slot_id)
                         time.sleep(0.05)
             
     def isFollowing(self):
@@ -1820,7 +1959,7 @@ class Bot:
         if self.vocation == "druid":
             hppc = self.getPartyLeaderVitals()
             if hppc < 80:
-                self.clickActionbarSlot(self.sio_slot)
+                self.clickActionbarSlot(self.slots.get("sio"))
 
     def cavebottest(self):
         marks = self.getClosestMarks()
@@ -2265,9 +2404,21 @@ if __name__ == "__main__":
         #if bot.use_utito:
         #    if bot.vocation == "knight":
         #        bot.utito()
-        if bot.attack_spells.get():
-            bot.attackSpells()
         times[6] = timeInMillis()
+        
+        # --- COMBAT LOGIC CHAIN ---
+        if bot.attack_spells.get():
+            # 1. Try Big Area Spells (e.g. UE/Wave) if density is high
+            did_aoe_spell = bot.attackAreaSpells()
+            
+            # 2. If no Big Spell, try Area Rune (GFB)
+            did_rune = False
+            if not did_aoe_spell and bot.use_area_rune.get():
+                did_rune = bot.useAreaRune()
+            
+            # 3. If no AoE occurred, use Single Target Spell (Filler)
+            if not did_aoe_spell and not did_rune:
+                bot.attackTargetSpells()
         if bot.cavebot.get():
             bot.cavebottest()
             #if bot.vocation == "knight":

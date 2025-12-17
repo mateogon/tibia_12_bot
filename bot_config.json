@@ -124,8 +124,8 @@
             },
             "spells": {
                 "area_slots": [
-                    3,
-                    4
+                    4,
+                    5
                 ],
                 "target_slots": [
                     6,
@@ -139,7 +139,9 @@
                 "attack_spells": true,
                 "use_area_rune": true,
                 "min_monsters_spell": 1,
-                "min_monsters_rune": 2
+                "min_monsters_rune": 1,
+                "kill_amount": 5,
+                "kill_stop_amount": 1
             }
         },
         "paladin": {

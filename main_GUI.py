@@ -260,7 +260,7 @@ class ModernBotGUI:
         self._switch(f_loot, "Loot On Spot (Right Click)", "loot_on_spot")
 
         f_logic = self._create_section(parent, "Stop Conditions")
-        self._entry_row(f_logic, "Stop after X Kills:", "kill_stop_amount")
+        self._entry_row(f_logic, "Stop when X Monsters Left:", "kill_stop_amount")
         self._entry_row(f_logic, "Kill Amount (Batch):", "kill_amount")
 
     def _build_map_tab(self, parent):
