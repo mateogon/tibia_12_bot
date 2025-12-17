@@ -167,6 +167,9 @@ class Bot:
         self.lure_walk_duration = 0.6  # Segundos caminando
         self.lure_stop_duration = 0.4  # Segundos parado
 
+        self.last_map_center_img = None
+        self.kiting_stuck_count = 0
+        self.kite_rotation_offset = 0
     
     def _init_timers(self):
         self.normal_delay = getNormalDelay()
@@ -186,6 +189,7 @@ class Bot:
         self.delays.set_default("amp_res", 6000)
         self.delays.set_default("utito", 10000)
         self.delays.set_default("centering", 800) # Only recenter every 1.5s
+        self.delays.set_default("kiting", 500) # El mago reacciona más rápido (0.8s) que el caballero
 
         # Immediate Triggers
         for timer in ["equip_cycle", "lure_stop", "exeta_res", "amp_res"]:
@@ -203,6 +207,8 @@ class Bot:
         self.use_lure_walk = BooleanVar(value=s.get("use_lure_walk", False))
         self.lure_walk_ms  = IntVar(value=int(s.get("lure_walk_ms", 600)))
         self.lure_stop_ms  = IntVar(value=int(s.get("lure_stop_ms", 400)))
+        self.use_recenter = BooleanVar(value=s.get("use_recenter", False))
+        self.use_kiting   = BooleanVar(value=s.get("use_kiting", False))
         self.follow_party     = BooleanVar(value=s.get("follow_party", False))
         self.manual_loot      = BooleanVar(value=s.get("manual_loot", False))
         self.loot_on_spot     = BooleanVar(value=s.get("loot_on_spot", False))
@@ -1847,11 +1853,13 @@ class Bot:
         kill_time = time.time() - self.kill_start_time
         
         if self.kill:
-            # --- TACTICAL POSITIONING ---
-            # Only EKs dive into the pack. 
-            # Mages and Paladins stay where they are (or kite).
-            if self.vocation == "knight" and self.monster_count > 1:
-                self.recenter_on_pack()
+            if self.monster_count >= 1:
+                if self.use_recenter.get():
+                    self.recenter_on_pack()
+                elif self.use_kiting.get():
+                    # Pass the first mark position if it exists
+                    target_mark = marks[0][1] if marks else None
+                    self.kite_from_pack(target_mark_pos=target_mark)
             # ----------------------------
 
             if self.monster_count <= self.kill_stop_amount.get() or kill_time > self.kill_stop_time:
@@ -1964,6 +1972,73 @@ class Bot:
         self.GUI.root.after(50, lambda: self.clickAttack(force=True))
         self.delays.trigger("centering")
 
+    def check_if_moving(self):
+        """Returns True if the character actually changed coordinates on the map."""
+        current_map = self.getCenterMarkImage() # 10x10 crop of map center
+        if self.last_map_center_img is None:
+            self.last_map_center_img = current_map
+            return True
+        
+        # Compare images (simple pixel difference)
+        diff = cv2.absdiff(self.last_map_center_img, current_map)
+        if np.mean(diff) < 1.0: # Threshold for 'identical' images
+            return False # We are stationary
+            
+        self.last_map_center_img = current_map
+        return True
+    
+    def kite_from_pack(self, target_mark_pos=None):
+        if not self.delays.due("kiting") or not self.monster_positions:
+            return
+
+        p_center = self.s_GameScreen.getRelativeCenter()
+        tile_size = self.s_GameScreen.tile_h
+        
+        # 1. Check for Stuck state from previous attempt
+        if not self.check_if_moving():
+            self.kiting_stuck_count += 1
+            self.kite_rotation_offset += 45 # Rotate escape angle if stuck
+        else:
+            self.kiting_stuck_count = 0
+            self.kite_rotation_offset = 0
+
+        # 2. Calculate Flee Vector
+        avg_mx = sum([m[0] for m in self.monster_positions]) / len(self.monster_positions)
+        avg_my = sum([m[1] for m in self.monster_positions]) / len(self.monster_positions)
+        
+        flee_dx = p_center[0] - avg_mx
+        flee_dy = p_center[1] - avg_my
+        
+        # 3. Path Prioritization
+        # If we have a mark, slightly pull the flee vector toward the mark direction
+        if target_mark_pos:
+            m_dx = target_mark_pos[0] - self.s_Map.center[0]
+            m_dy = target_mark_pos[1] - self.s_Map.center[1]
+            # Blend flee vector (70%) with path vector (30%)
+            flee_dx = (flee_dx * 0.7) + (m_dx * 0.3)
+            flee_dy = (flee_dy * 0.7) + (m_dy * 0.3)
+
+        # 4. Apply Rotation Offset (if we were stuck)
+        if self.kite_rotation_offset != 0:
+            rad = np.deg2rad(self.kite_rotation_offset)
+            nx = flee_dx * np.cos(rad) - flee_dy * np.sin(rad)
+            ny = flee_dx * np.sin(rad) + flee_dy * np.cos(rad)
+            flee_dx, flee_dy = nx, ny
+
+        # 5. Convert to Tile Step (-1, 0, 1)
+        dir_x = 1 if flee_dx > 10 else (-1 if flee_dx < -10 else 0)
+        dir_y = 1 if flee_dy > 10 else (-1 if flee_dy < -10 else 0)
+
+        # 6. Execute Step
+        target_rel_x = p_center[0] + (dir_x * tile_size)
+        target_rel_y = p_center[1] + (dir_y * tile_size)
+        
+        gs_region = self.s_GameScreen.region
+        click_client(self.hwnd, int(gs_region[0] + target_rel_x), int(gs_region[1] + target_rel_y))
+        
+        self.GUI.root.after(50, lambda: self.clickAttack(force=True))
+        self.delays.trigger("kiting")
+        
     def reset_marks_history(self):
         """Manually clears the 'visited' status of map marks."""
         print("[CAVEBOT] Resetting mark history. All marks are now fresh.")

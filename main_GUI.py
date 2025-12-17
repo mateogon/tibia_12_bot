@@ -58,6 +58,7 @@ class ModernBotGUI:
             'kill_amount', 'kill_stop_amount',
             'party_leader', 'waypoint_folder',
             'use_lure_walk', 'lure_walk_ms', 'lure_stop_ms',
+            'use_recenter', 'use_kiting',
         ]
         
         for key in keys:
@@ -241,35 +242,42 @@ class ModernBotGUI:
         self._list_entry(f_rot, "Target Spells:", "target_spells_slots")
 
     def _build_cavebot_tab(self, parent):
+        # 1. Navigation Section
         f_nav = self._create_section(parent, "Navigation")
         
-        # --- Custom Row: Cavebot Switch + Reset Button ---
+        # Row: Cavebot Switch + Reset Button
         row_frame = ctk.CTkFrame(f_nav, fg_color="transparent")
         row_frame.pack(fill="x", padx=10, pady=5)
         
-        # Switch on the Left
         cb_switch = ctk.CTkSwitch(row_frame, text="Enable Cavebot Walker", variable=self.vars['cavebot'])
         cb_switch.pack(side="left")
         
-        # Reset Button on the Right
         reset_btn = ctk.CTkButton(row_frame, text="Reset History", width=100, height=24,
-                                  fg_color="#D2691E", hover_color="#A0522D", # Orange/Brown style
+                                  fg_color="#D2691E", hover_color="#A0522D", 
                                   command=self.bot.reset_marks_history)
         reset_btn.pack(side="right")
 
+        # Follow logic (Now correctly placed inside Navigation before other sections start)
+        self._switch(f_nav, "Follow Party Leader", "follow_party")
+        self._entry_row(f_nav, "Party Leader Name:", "party_leader")
+
+        # 2. Tactical Positioning Section
+        f_tactics = self._create_section(parent, "Tactical Positioning")
+        self._switch(f_tactics, "Recenter (Dive into Pack)", "use_recenter")
+        self._switch(f_tactics, "Kite (Keep Distance)", "use_kiting")
+
+        # 3. Lure Section
         f_lure = self._create_section(parent, "Lure / Stutter Walk")
         self._switch(f_lure, "Enable Lure Stutter", "use_lure_walk")
         self._entry_row(f_lure, "Walk Duration (ms):", "lure_walk_ms")
         self._entry_row(f_lure, "Stop Duration (ms):", "lure_stop_ms")
-        # -------------------------------------------------
 
-        self._switch(f_nav, "Follow Party Leader", "follow_party")
-        self._entry_row(f_nav, "Party Leader Name:", "party_leader")
-
+        # 4. Looting Section
         f_loot = self._create_section(parent, "Looting")
         self._switch(f_loot, "Loot Monsters", "manual_loot")
         self._switch(f_loot, "Loot On Spot (Right Click)", "loot_on_spot")
 
+        # 5. Stop Conditions Section
         f_logic = self._create_section(parent, "Stop Conditions")
         self._entry_row(f_logic, "Stop when X Monsters Left:", "kill_stop_amount")
         self._entry_row(f_logic, "Kill Amount (Batch):", "kill_amount")
@@ -288,7 +296,7 @@ class ModernBotGUI:
 
     def _build_settings_tab(self, parent):
         f_snap = self._create_section(parent, "Developer Tools")
-        ctk.CTkButton(f_snap, text="Save Snapshot (Training Data)", 
+        ctk.CTkButton(f_snap, text="Save Snapshot (Training Data)",
                       command=self.bot.capture_training_data,
                       fg_color="#4B0082").pack(fill="x", padx=10, pady=10)
 

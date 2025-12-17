@@ -300,7 +300,9 @@
                 "waypoint_folder": "test",
                 "use_lure_walk": true,
                 "lure_walk_ms": 200,
-                "lure_stop_ms": 400
+                "lure_stop_ms": 400,
+                "use_recenter": true,
+                "use_kiting": false
             }
         }
     }

@@ -10,7 +10,7 @@ GUI_BOOL_KEYS = [
     "loop", "attack", "attack_spells", "hp_heal", "mp_heal",
     "manual_loot", "cavebot", "res", "follow_party", "use_area_rune",
     "manage_equipment", "loot_on_spot", "amp_res", "show_area_rune_target",
-    "use_utito", 'use_haste', 'use_food',"use_lure_walk",
+    "use_utito", 'use_haste', 'use_food',"use_lure_walk", "use_recenter", "use_kiting"
 ]
 GUI_INT_KEYS = [
     "hp_thresh_high", "hp_thresh_low", "mp_thresh",
@@ -32,6 +32,8 @@ BASE_SETTINGS = {
     "use_lure_walk": False,
     "lure_walk_ms": 600,
     "lure_stop_ms": 400,
+    "use_recenter": False,
+    "use_kiting": False,
     "res": False,
     "amp_res": False,
     "follow_party": False,
@@ -128,6 +130,8 @@ DEFAULTS = {
             "use_area_rune": False,
             "min_monsters_spell": 2, "min_monsters_rune": 1,
             "kill_amount": 5, "kill_stop_amount": 1,
+            "use_recenter": True, # Default ON for EKs
+            "use_kiting": False,
         },
     }),
     "druid": make_default({
@@ -148,6 +152,8 @@ DEFAULTS = {
             "use_area_rune": True,
             "min_monsters_spell": 1, "min_monsters_rune": 2,
             "kill_amount": 5, "kill_stop_amount": 1,
+            "use_recenter": False,
+            "use_kiting": True, # Default ON for Mages
         },
     }),
     "sorcerer": make_default({
@@ -168,6 +174,8 @@ DEFAULTS = {
             "use_area_rune": True,
             "min_monsters_spell": 1, "min_monsters_rune": 2,
             "kill_amount": 5, "kill_stop_amount": 1,
+            "use_recenter": False,
+            "use_kiting": True, # Default ON for Mages
         },
     }),
     "paladin": make_default({
@@ -188,6 +196,8 @@ DEFAULTS = {
             "use_area_rune": True,
             "min_monsters_spell": 3, "min_monsters_rune": 1,
             "kill_amount": 5, "kill_stop_amount": 1,
+            "use_recenter": False,
+            "use_kiting": True, # Default ON for Mages
         },
     }),
 }
