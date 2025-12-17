@@ -25,6 +25,7 @@ wsh= comclt.Dispatch("WScript.Shell")
 import data
 import image as img
 import detect_monsters as dm
+import config_manager as cm
 from screen_elements import *
 from window_interaction import *
 from extras import *
@@ -121,127 +122,141 @@ class Bot:
         self.hppc = 100
         self.mppc = 100
         
-        self.player_list = {}
-        self.player_list["Mateogon"] = {"vocation" :"sorcerer", "spell_area" : 6}
-        self.player_list["Mateo Gon"] = {"vocation" :"knight", "spell_area" : 3}
-        self.player_list["Master Liqui"] = {"vocation" :"knight", "spell_area" : 4}
-        self.player_list["Thyrion"] = {"vocation" :"paladin", "spell_area" : 5}
-        self.player_list["Zane"] = {"vocation" :"sorcerer", "spell_area" : 3}
-        self.player_list["Helios"] = {"vocation" :"paladin", "spell_area" : 6}
-        self.player_list["Kaz"] = {"vocation" :"druid", "spell_area" : 6}
-        self.player_list["Master"] = {"vocation" :"druid", "spell_area" : 6}
-        self.party_leader = "Master Liqui"
-        self.vocation = self.player_list[self.character_name]["vocation"]
+        self.ElementsLists = [self.ScreenElements,self.BoundScreenElements,self.RelativeScreenElements,self.ScreenWindows,]
+        self.action_bar_anchor_pos = None 
+
+        # --- NEW CONFIGURATION SYSTEM ---
+        # 1. Initialize Config Manager
+        self.config = cm.ConfigManager()
+        
+        # 2. Identify Character & Load Data
+        self.character_name = self.getCharacterName()
+        if self.character_name is None:
+            print("You are not logged in.")
+            exit()
+
+        char_data = self.config.get_character(self.character_name)
+        self.vocation = char_data["vocation"]
+        self.areaspell_area = char_data["spell_area"]
+        self.party_leader = char_data.get("party_leader", "") # Default to empty if not set
+        
+        # 3. Load Vocation Preset
+        self.preset = self.config.get_preset(self.vocation)
+        
+        # 4. LOAD SLOTS (The Action Bar mapping)
+        self.slots = self.preset["slots"]
+        
+        # Load Spell Rotations (Lists of slots)
+        self.area_spells_slots = self.preset["spells"]["area_slots"]
+        self.target_spells_slots = self.preset["spells"]["target_slots"]
+        
+        # 5. LOAD SETTINGS (With defaults if missing)
+        s = self.preset["settings"]
+        
+        # -- Thresholds --
+        self.hp_thresh_high = s.get("hp_thresh_high", 90)
+        self.hp_thresh_low = s.get("hp_thresh_low", 70)
+        self.mp_thresh = s.get("mp_thresh", 30)
+        
+        # -- Combat Logic --
+        self.min_monsters_around_spell = s.get("min_monsters_spell", 1)
+        self.min_monsters_for_rune = s.get("min_monsters_rune", 1)
+        self.attack_spells = s.get("attack_spells", True)
+        self.res = s.get("res", False)
+        self.amp_res = s.get("amp_res", False)
+        self.use_utito = s.get("use_utito", False)
+        self.use_area_rune = s.get("use_area_rune", False)
+        
+        # -- Toggles --
+        self.hp_heal = True
+        self.mp_heal = True
+        self.loop = True
+        self.attack = True
+        self.cavebot = False
+        self.follow_party = False
+        self.manual_loot = False
+        self.loot_on_spot = False
+        self.manage_equipment = False
+        self.show_area_rune_target = True
+        
+        # -- Internal Timers & Queues --
         self.party = {}
         self.party_positions = []
-        #hp history for burst damage
+        self.monster_positions = []
+        self.monsters_around = 0
+        
+        # HP History (Burst Calc)
         self.hp_queue = deque([], maxlen=3)
-        for i in range(0, 3):
-            self.hp_queue.append(100)
-        #monster around previous 10 seconds
+        for i in range(0, 3): self.hp_queue.append(100)
+            
+        # Monster History
         self.monster_queue_time = 0
         self.monster_queue = deque([], maxlen=10)
-        for i in range(0, 10):
-            self.monster_queue.append(0)
-        #buff dict
+        for i in range(0, 10): self.monster_queue.append(0)
+            
         self.buffs = {}
-        
-
-        #boolean to alternate between 2 spells
-        self.spell_alternate = True
         self.last_attack_time = timeInMillis()
-        self.normal_delay = getNormalDelay() #for randomness
+        
+        # Delays
+        self.normal_delay = getNormalDelay()
         self.delays = DelayManager(default_jitter_ms_fn=getNormalDelay)
-        # Debounce auto-attack clicks so we don't spam-click before the red highlight appears
         self.attack_click_delay_ms = 120
         self.delays.set_default("attack_click", self.attack_click_delay_ms)
         self.exeta_res_cast_time = 3
         self.amp_res_cast_time = 6
-        #configs
-        self.mp_thresh = 30
-        self.safe_mp_thresh = self.mp_thresh + 15
-        self.mana_hotkey = 'F3'
-        self.hp_thresh_high = 90
-        self.hp_thresh_low = 70
-        self.heal_high_hotkey = 'F1'
-        self.heal_low_hotkey = 'F2'
+        self.delays.set_default("attack_click", 120)
+        self.delays.set_default("area_rune", 1100)
+        self.delays.set_default("equip_cycle", 200)
+        self.delays.set_default("lure_stop", 250)
+        self.delays.set_default("follow_retry", 2500)
+        self.delays.set_default("exeta_res", 3000)
+        self.delays.set_default("amp_res", 6000)
+        self.delays.set_default("utito", 10000)
         
-        #self.areaspell1_hotkey = 'F5'
-        self.areaspell_area = self.player_list[self.character_name]["spell_area"]
-        #self.areaspell2_hotkey = 'F6'
-        self.min_monsters_around_spell = 1
-        self.area_spells_hotkeys = ['F5','F6','F7']
-        self.area_spells_slots = [4,5,6]
-        self.target_spells_hotkeys = ['F8','F9']
-        self.target_spells_slots = [7,8]
+        # Trigger initial delays
+        self.delays.trigger("equip_cycle")
+        self.delays.trigger("lure_stop")
+        self.delays.trigger("walk", base_ms=200)
+
+        # Configs that didn't fit in preset or are global
         self.check_spell_cooldowns = True
-        self.utito_slot = 16
-        self.use_utito = True
-        self.use_area_rune = False
-        self.area_rune_hotkey = 'F10'
-        self.area_rune_slot = 9
-        # Area rune (2-click cast) delay + debug visualization
+        self.check_monster_queue = True
         self.area_rune_delay_ms = 1100
         self.area_rune_target_click_delay_s = 0.08
-        self.show_area_rune_target = True
-        #try:
-            #self.monsters_around_image = False#PhotoImage(file="monsters_around.png")
-        #except:
-            #image = np.zeros([100,100,3],dtype=np.uint8)
-            #image.fill(0) # or img[:] = 255
-            #cv2.imwrite("monsters_around.png",image)
-            #self.monsters_around_image = PhotoImage(file="monsters_around.png")
-        self.exeta_res_hotkey = 'F11'
-        self.exeta_res_slot = 10
-        self.amp_res_slot = 15
-        self.haste_hotkey = 'F12'
-        self.haste_slot = 11
-        self.eat_hotkey = '+'
-        self.food_slot = 13
-        self.sio_slot = 14
-        self.magic_shield_slot = 16
-        self.cancel_magic_shield_slot = 32
-        self.magic_shield_enabled = False
-        # starts at 0
-        self.ring_slot = 21
-        self.amulet_slot = 20
+        self.safe_mp_thresh = self.mp_thresh + 15
+        
+        # Equipment Slot Definitions (Fixed by Game Client)
         self.weapon_slot = 18
         self.helmet_slot = 17
         self.armor_slot = 19
         self.shield_slot = 22
-        self.equipment_slots = [self.weapon_slot,self.helmet_slot,self.armor_slot,self.amulet_slot,self.ring_slot,self.shield_slot]#,]
-        self.slot_status = []
-        for i in range(0,30):
-            self.slot_status.append(False)
-        #cavebot
-        self.manual_loot = False
-        self.lure = False
+        self.amulet_slot = 20
+        self.ring_slot = 21
+        self.equipment_slots = [self.weapon_slot, self.helmet_slot, self.armor_slot, self.amulet_slot, self.ring_slot, self.shield_slot]
+        
+        self.slot_status = [False] * 30
+        
+        # Cavebot defaults
         self.kill_amount = 5
         self.kill_stop_amount = 1
         self.kill_stop_time = 120
         self.lure_amount = 2
         self.kill = False
         self.kill_start_time = time.time()
-        self.mark_list = ["skull","lock","cross"]
-        self.monster_positions = []
-        self.monsters_around = 0
-        self.key_pressed = False
-        '''
-        for file in os.listdir(os.getcwd() + "\\img\\map_marks"):
-                fname = os.fsdecode(file)
-                if fname.endswith(".png"):
-                    fname = fname.replace(".png", "")
-                    self.mark_list.append(fname)
-        '''   
+        self.lure = False
+        self.waypoint_folder = "test"
+        
+        # Marks
+        self.mark_list = ["skull", "lock", "cross"]
         self.current_mark_index = 0
         self.current_mark = self.mark_list[self.current_mark_index]
-        self.previous_marks = {}
-        self.monster_around_scale_ratio = 2
-        for mark in self.mark_list:
-            self.previous_marks[mark] = False
+        self.previous_marks = {mark: False for mark in self.mark_list}
+        
         self.chat_status_region = False
         self.current_map_image = None
-        #GUI
+        self.key_pressed = False
+
+        # GUI Init
         self.GUI = ModernBotGUI(self, self.character_name, self.vocation)
         self.follow_retry_delay = 2.5
 
@@ -843,49 +858,59 @@ class Bot:
     
     def manageHealth(self):
         self.getHealth()
-        #print("hppc: "+str(self.hppc))
         self.hp_queue.pop()
         self.hp_queue.appendleft(self.hppc)
-
         burst = self.getBurstDamage()
         
+        # Use SLOTS instead of Key Press
         if (self.hppc <= self.hp_thresh_low.get() or burst > 40):
-            press(self.hwnd,self.heal_high_hotkey)
+            # Check if slot exists in config
+            if "heal_low" in self.slots: 
+                self.clickActionbarSlot(self.slots["heal_low"])
+                
         elif self.hppc < self.hp_thresh_high.get():
-            press(self.hwnd,self.heal_low_hotkey)
+            if "heal_high" in self.slots:
+                self.clickActionbarSlot(self.slots["heal_high"])
             
     def manageMana(self):
         self.getMana()
-        
         if self.isAttacking():
             thresh = self.mp_thresh.get()
         else:
             thresh = self.safe_mp_thresh
+            
         if (self.mppc <= thresh and self.hppc >= self.hp_thresh_low.get()):
-            press(self.hwnd,self.mana_hotkey)
+            if "mana" in self.slots:
+                self.clickActionbarSlot(self.slots["mana"])
+
     def castExetaRes(self):
         if not self.delays.due("exeta_res"):
             return
-        if self.clickActionbarSlot(self.exeta_res_slot):
-            self.delays.trigger("exeta_res")
+        slot = self.slots.get("exeta") 
+        if slot is not None:
+            if self.clickActionbarSlot(slot):
+                self.delays.trigger("exeta_res")
 
     def castAmpRes(self):
         if not self.delays.due("amp_res"):
             return
-        if self.clickActionbarSlot(self.amp_res_slot):
-            self.delays.trigger("amp_res")
+        slot = self.slots.get("amp_res")
+        if slot is not None:
+            if self.clickActionbarSlot(slot):
+                self.delays.trigger("amp_res")
 
     def haste(self):
-        if self.slot_status[self.haste_slot]:
+        slot = self.slots.get("haste")
+        if slot is not None and self.slot_status[slot]:
             if not self.buffs['haste'] and not self.buffs['pz']:
-                #print("hasting")
-                press(self.hwnd,self.haste_hotkey)
+                self.clickActionbarSlot(slot)
+                
     def eat(self):
-        if self.slot_status[self.food_slot]:
+        slot = self.slots.get("food")
+        if slot is not None and self.slot_status[slot]:
             if not self.buffs['pz'] and self.buffs['hungry']:
-                print("eating")
                 # Skip cooldown check for food
-                self.clickActionbarSlot(self.food_slot, check_cooldown=False)
+                self.clickActionbarSlot(slot, check_cooldown=False)
     
     def shouldUtito(self,monster_count):
         b_x, b_y,_,b_y2 = self.s_BattleList.region
@@ -1070,7 +1095,6 @@ class Bot:
         rel_x = 25
         start_y = 30
         step_y = 22
-        print("clickAttack called - before loop")
         # 4. Iterate through the slots using the image array
         for rel_y in range(start_y, height, step_y):
             
@@ -1309,70 +1333,85 @@ class Bot:
 
         print(f"[DATA] Saved {img_filename} with {len(name_positions)} name labels.")
         
-    def useAreaRune(self,test = False):
-        if not test and (self.buffs['pz'] or self.monsterCount() <= 1):
-            return
-        if not test and not self.delays.due("area_rune"):
-            return
-        start = timeInMillis()
-        #contours,opening = self.getMonstersAroundContours(9)
-        #opening = cv2.cvtColor(opening,cv2.COLOR_GRAY2BGR)
-        #opening = img.screengrab_array(self.hwnd,self.s_GameScreen.region)
+    def useAreaRune(self, test=False):
+        # 1. Get the SPECIFIC threshold for runes
+        min_monsters = self.min_monsters_for_rune.get()
+
+        # 2. Quick Fail Checks
+        if not test:
+            if self.buffs.get('pz', False):
+                return
+            if self.monsterCount() < min_monsters:
+                return
+            if not self.delays.due("area_rune"):
+                return
+
+        # 3. Get valid targets
         region = self.s_GameScreen.region
         tile = self.s_GameScreen.tile_w
-        tile_radius = 3
-        min_cont = False
-        min_neighbors_list = []
+        tile_radius = 3  # Radius of GFB/Avalanche (approx 3 tiles)
         
         valid_positions = [p for p in self.monster_positions if p != (0, 0)]
-        if len(valid_positions) < 2:
+        
+        # Optimization: If total tracked positions < requirement, don't bother clustering
+        if len(valid_positions) < min_monsters:
             return
 
-        for cur in valid_positions:
-            neighbors_list = []
-            # compute the center of the contour
-            curX ,curY = cur
-            neighbors_list.append((curX,curY))
-            for c in valid_positions:
-                if cur == c:
-                    continue
-                # compute the center of the contour
-                cX,cY = c
-                dist = sqrt((cX-curX)**2+(cY-curY)**2)
-                if dist <= tile*tile_radius:
-                    neighbors_list.append((cX,cY))
-                    #total_dist += dist
+        # 4. Find Best Cluster (Brute Force Center Search)
+        best_center = None
+        best_neighbors = []
+
+        for center_candidate in valid_positions:
+            curX, curY = center_candidate
+            
+            # Find all neighbors within rune radius of this candidate
+            neighbors = []
+            for potential in valid_positions:
+                pX, pY = potential
+                dist = sqrt((pX - curX)**2 + (pY - curY)**2)
                 
-            if len(neighbors_list) > len(min_neighbors_list):
-                #min_dist = total_dist
-                min_cont = (curX,curY)
-                min_neighbors_list = neighbors_list
-                if len(min_neighbors_list) > 4:
+                # Check distance (Radius * Tile Size)
+                if dist <= (tile * tile_radius):
+                    neighbors.append((pX, pY))
+            
+            # If this cluster is better than what we found before, keep it
+            if len(neighbors) > len(best_neighbors):
+                best_neighbors = neighbors
+                best_center = center_candidate
+                
+                # Optimization: If we found a huge cluster, stop searching early
+                if len(best_neighbors) >= 5:
                     break
         
-        if min_cont is not False:
-            x = sum([x[0] for x in min_neighbors_list])/len(min_neighbors_list)
-            y = sum([x[1] for x in min_neighbors_list])/len(min_neighbors_list)
-            #print((x,y))
-            x = int(x)
-            y = int(y)
-            #cv2.circle(opening,(x,y), int(tile*tile_radius), (0,0,255), 2)
-            #img.visualize_fast(opening)
-            if len(min_neighbors_list) > 1:
-                #pass
-                #offset = int(2*tile/3)
-                self._visualize_area_rune_target(x, y, neighbors_rel=min_neighbors_list, radius_px=tile*tile_radius)
+        # 5. Execute Attack
+        if best_center is not None:
+            # Check against the GUI setting
+            if len(best_neighbors) >= min_monsters:
+                
+                # Calculate the centroid of the cluster for optimal coverage
+                avg_x = sum([n[0] for n in best_neighbors]) / len(best_neighbors)
+                avg_y = sum([n[1] for n in best_neighbors]) / len(best_neighbors)
+                
+                final_x = int(avg_x)
+                final_y = int(avg_y)
 
-                # Only click the ground if we successfully clicked the rune slot (otherwise we'd just walk)
-                if not self.isActionbarSlotSet(self.area_rune_slot):
-                    return
-                if not self.clickActionbarSlot(self.area_rune_slot):
-                    return
+                # Visualize (Debug / GUI toggle)
+                self._visualize_area_rune_target(final_x, final_y, neighbors_rel=best_neighbors, radius_px=tile*tile_radius)
 
-                time.sleep(self.area_rune_target_click_delay_s)
-                click_client(self.hwnd, region[0] + x, region[1] + y)
-                self.delays.trigger("area_rune")
-        #print(timeInMillis()-start)
+                if not test:
+                    # 1. Click Rune Hotkey
+                    if not self.clickActionbarSlot(self.area_rune_slot):
+                        return
+                    
+                    # 2. Click Game Screen (Global Coordinates)
+                    # region[0], region[1] are the top-left of the game screen
+                    click_client(self.hwnd, region[0] + final_x, region[1] + final_y)
+                    
+                    # 3. Set Cooldown
+                    self.delays.trigger("area_rune")
+                    print(f"[COMBAT] Fired Area Rune on {len(best_neighbors)} targets.")
+
+
     def walkAwayFromMonsters(self):
         region = self.s_GameScreen.region
         relative_center = self.s_GameScreen.getRelativeCenter()
@@ -1469,69 +1508,85 @@ class Bot:
     
     
     def attackSpells(self):
-
-        if self.buffs['pz'] or self.monsterCount() == 0:
+        # 1. Safety Checks
+        if self.buffs.get('pz', False) or self.monsterCount() == 0:
             return
-        #start = timeInMillis()
-    
-        cur_sleep = timeInMillis() - self.last_attack_time
-        
-        if (timeInMillis() - cur_sleep > (100+self.normal_delay)):
-            
-            self.monsters_around = self.getMonstersAround(self.areaspell_area,True,True)
-            
-            self.monster_count = self.monsterCount()
-            #print(monsters_around)
-            
-            if time.time() - self.monster_queue_time >= 1:
-                self.monster_queue.pop()
-                self.monster_queue.appendleft(self.monsters_around)
-                self.monster_queue_time = time.time()
-            #print("monsters around: "+str(self.monsters_around))
-            if self.monsters_around > 0:
-                
-                if self.res.get(): #and self.shouldRes()
-                    self.castExetaRes()
-                if self.amp_res.get():
-                    #print("")
-                    monsters_in_melee = self.getMonstersAround(3, False, False)
-                    print("monsters in melee: "+str(monsters_in_melee) + " / "+ str(self.monster_count))
-                    # If we have 5 mobs in Battle List, but only 3 in Melee range -> Cast!
-                    if monsters_in_melee < self.monster_count:
-                        print("casting amp res")
-                        self.castAmpRes()
-                        
-                times[4] = timeInMillis()
-                if (self.kill and self.cavebot.get()) or self.monsters_around >= self.min_monsters_around_spell.get() :#or self.checkMonsterQueue():
-                    for i in range(0,len(self.area_spells_hotkeys)):
-                        if self.check_spell_cooldowns:
 
-                            if self.checkActionBarSlotCooldown(self.area_spells_slots[i]):
-                                #print("casting area spell")
-                                press(self.hwnd,self.area_spells_hotkeys[i])
-                        else:
-                            press(self.hwnd,self.area_spells_hotkeys[i])
-                        #press(self.hwnd,hotkey)
-                    '''
-                    if self.spell_alternate:
-                        press(self.hwnd,self.areaspell1_hotkey)
+        # 2. Global Cooldown / Delay Check
+        cur_sleep = timeInMillis() - self.last_attack_time
+        if (timeInMillis() - cur_sleep <= (100 + self.normal_delay)):
+            return
+
+        # 3. Update State
+        # (Get accurate count for spells)
+        self.monsters_around = self.getMonstersAround(self.areaspell_area, True, True)
+        self.monster_count = self.monsterCount()
+
+        # 4. Maintain Monster Queue (Preserved from your code)
+        if time.time() - self.monster_queue_time >= 1:
+            self.monster_queue.pop()
+            self.monster_queue.appendleft(self.monsters_around)
+            self.monster_queue_time = time.time()
+
+        if self.monsters_around > 0:
+            
+            # --- SUPPORT SPELLS (Exeta / Amp Res) ---
+            # Using new Slot system instead of hardcoded hotkeys
+            
+            # Exeta Res
+            if self.res.get(): 
+                # Check if we have a slot defined for 'exeta'
+                if "exeta" in self.slots:
+                    self.castExetaRes() # Ensure castExetaRes uses self.slots['exeta'] too
+
+            # Amp Res
+            if self.amp_res.get():
+                monsters_in_melee = self.getMonstersAround(3, False, False)
+                # Logic: If we see more monsters than are in melee range, cast Amp Res
+                if monsters_in_melee < self.monster_count:
+                    if "amp_res" in self.slots:
+                        self.castAmpRes()
+
+            # --- ATTACK SPELL ROTATION ---
+            
+            # Condition: Kill Mode OR Enough Monsters
+            should_aoe = (self.kill and self.cavebot.get()) or \
+                         (self.monsters_around >= self.min_monsters_around_spell.get())
+
+            if should_aoe:
+                # Iterate through the list of Area Spell Slots (F5, F6, etc.)
+                for slot in self.area_spells_slots:
+                    if self.check_spell_cooldowns:
+                        # Only click if the slot is NOT on cooldown
+                        if self.checkActionBarSlotCooldown(slot):
+                            if self.clickActionbarSlot(slot):
+                                self.updateLastAttackTime()
+                                self.newNormalDelay()
+                                return # STOP after one successful cast (Efficient)
                     else:
-                        press(self.hwnd,self.areaspell2_hotkey)
-                    #self.spell_alternate = not self.spell_alternate
-                    '''
-                    self.updateLastAttackTime()
-                    self.newNormalDelay() 
-                elif self.monsters_around >= 1:
-                    #for hotkey in self.:
-                     #   press(self.hwnd,hotkey)
-                    for i in range(0,len(self.target_spells_hotkeys)):
-                        if self.check_spell_cooldowns:
-                            if self.checkActionBarSlotCooldown(self.target_spells_slots[i]):
-                                press(self.hwnd,self.target_spells_hotkeys[i])
-                        else:
-                            press(self.hwnd,self.target_spells_hotkeys[i])
-                    self.updateLastAttackTime()
-                    self.newNormalDelay()
+                        # No cooldown check, just spam (Original behavior support)
+                        self.clickActionbarSlot(slot)
+                        self.updateLastAttackTime()
+                        self.newNormalDelay()
+                        return
+
+            # --- SINGLE TARGET ROTATION ---
+            elif self.monsters_around >= 1:
+                # Iterate through Single Target Slots (F8, F9, etc.)
+                for slot in self.target_spells_slots:
+                    if self.check_spell_cooldowns:
+                        if self.checkActionBarSlotCooldown(slot):
+                            if self.clickActionbarSlot(slot):
+                                self.updateLastAttackTime()
+                                self.newNormalDelay()
+                                return
+                    else:
+                        self.clickActionbarSlot(slot)
+                        self.updateLastAttackTime()
+                        self.newNormalDelay()
+                        return
+
+
     def manageEquipment(self):
         if not self.delays.allow("equip_cycle"):
             return
@@ -1793,9 +1848,6 @@ class Bot:
                     self.nextMark()
                 else:
                     if self.delays.allow("walk", base_ms=walk_delay):
-
-                        #print(str(walk_delay))
-                        print("clicking mark")
                         click_client(self.hwnd,pos[0],pos[1])
                         
 

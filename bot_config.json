@@ -1,0 +1,176 @@
+{
+    "last_character": "Mateo Gon",
+    "characters": {
+        "Mateogon": {
+            "vocation": "sorcerer",
+            "spell_area": 6
+        },
+        "Mateo Gon": {
+            "vocation": "knight",
+            "spell_area": 3
+        },
+        "Thyrion": {
+            "vocation": "paladin",
+            "spell_area": 5
+        },
+        "Zane": {
+            "vocation": "sorcerer",
+            "spell_area": 3
+        },
+        "Helios": {
+            "vocation": "paladin",
+            "spell_area": 6
+        },
+        "Kaz": {
+            "vocation": "druid",
+            "spell_area": 6
+        },
+        "Master": {
+            "vocation": "druid",
+            "spell_area": 6
+        }
+    },
+    "presets": {
+        "knight": {
+            "slots": {
+                "heal_high": 0,
+                "heal_low": 1,
+                "mana": 2,
+                "utito": 15,
+                "exeta": 9,
+                "amp_res": 14,
+                "haste": 10,
+                "food": 12,
+                "ring": 20,
+                "amulet": 19,
+                "weapon": 17,
+                "helmet": 16,
+                "armor": 18,
+                "shield": 21
+            },
+            "spells": {
+                "area_slots": [
+                    3,
+                    4,
+                    5
+                ],
+                "target_slots": [
+                    6,
+                    7
+                ]
+            },
+            "settings": {
+                "hp_thresh_high": 90,
+                "hp_thresh_low": 60,
+                "mp_thresh": 10,
+                "attack_spells": true,
+                "res": true,
+                "use_utito": true,
+                "min_monsters_spell": 2,
+                "min_monsters_rune": 1
+            }
+        },
+        "druid": {
+            "slots": {
+                "heal_high": 0,
+                "heal_low": 1,
+                "mana": 2,
+                "sio": 13,
+                "haste": 10,
+                "food": 12,
+                "area_rune": 8,
+                "magic_shield": 15,
+                "cancel_magic_shield": 31,
+                "ring": 20,
+                "amulet": 19
+            },
+            "spells": {
+                "area_slots": [
+                    3,
+                    4
+                ],
+                "target_slots": [
+                    6,
+                    7
+                ]
+            },
+            "settings": {
+                "hp_thresh_high": 95,
+                "hp_thresh_low": 75,
+                "mp_thresh": 50,
+                "attack_spells": true,
+                "use_area_rune": true,
+                "min_monsters_spell": 1,
+                "min_monsters_rune": 2
+            }
+        },
+        "sorcerer": {
+            "slots": {
+                "heal_high": 0,
+                "heal_low": 1,
+                "mana": 2,
+                "sio": 13,
+                "haste": 10,
+                "food": 12,
+                "area_rune": 8,
+                "magic_shield": 15,
+                "cancel_magic_shield": 31,
+                "ring": 20,
+                "amulet": 19
+            },
+            "spells": {
+                "area_slots": [
+                    3,
+                    4
+                ],
+                "target_slots": [
+                    6,
+                    7
+                ]
+            },
+            "settings": {
+                "hp_thresh_high": 95,
+                "hp_thresh_low": 75,
+                "mp_thresh": 50,
+                "attack_spells": true,
+                "use_area_rune": true,
+                "min_monsters_spell": 1,
+                "min_monsters_rune": 2
+            }
+        },
+        "paladin": {
+            "slots": {
+                "heal_high": 0,
+                "heal_low": 1,
+                "mana": 2,
+                "sio": 13,
+                "haste": 10,
+                "food": 12,
+                "area_rune": 8,
+                "magic_shield": 15,
+                "cancel_magic_shield": 31,
+                "ring": 20,
+                "amulet": 19
+            },
+            "spells": {
+                "area_slots": [
+                    3,
+                    4
+                ],
+                "target_slots": [
+                    6,
+                    7
+                ]
+            },
+            "settings": {
+                "hp_thresh_high": 95,
+                "hp_thresh_low": 75,
+                "mp_thresh": 50,
+                "attack_spells": true,
+                "use_area_rune": false,
+                "min_monsters_spell": 1,
+                "min_monsters_rune": 2
+            }
+        }
+    }
+}
