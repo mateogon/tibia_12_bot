@@ -178,5 +178,67 @@
                 "min_monsters_rune": 2
             }
         }
+    },
+    "profiles": {
+        "Mateogon::sorcerer": {
+            "slots": {
+                "heal_high": 0,
+                "heal_low": 1,
+                "mana": 2,
+                "sio": null,
+                "haste": 10,
+                "food": 12,
+                "utito": null,
+                "exeta": null,
+                "amp_res": null,
+                "magic_shield": 15,
+                "cancel_magic_shield": 31,
+                "area_rune": 8,
+                "ring": 20,
+                "amulet": 19,
+                "weapon": null,
+                "shield": null,
+                "armor": null,
+                "helmet": null
+            },
+            "spells": {
+                "area_slots": [
+                    4,
+                    5
+                ],
+                "target_slots": [
+                    6,
+                    7
+                ]
+            },
+            "settings": {
+                "loop": true,
+                "attack": true,
+                "attack_spells": true,
+                "hp_heal": true,
+                "mp_heal": true,
+                "manual_loot": false,
+                "cavebot": false,
+                "res": false,
+                "amp_res": false,
+                "follow_party": false,
+                "use_area_rune": true,
+                "manage_equipment": true,
+                "loot_on_spot": false,
+                "show_area_rune_target": false,
+                "use_utito": false,
+                "hp_thresh_high": 95,
+                "hp_thresh_low": 70,
+                "mp_thresh": 50,
+                "min_monsters_spell": 4,
+                "min_monsters_rune": 1,
+                "kill_amount": 5,
+                "kill_stop_amount": 1,
+                "party_leader": "",
+                "waypoint_folder": "test",
+                "use_haste": true,
+                "use_food": false
+            }
+        }
     }
 }

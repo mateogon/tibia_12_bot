@@ -21,7 +21,6 @@ class ModernBotGUI:
         
         # Variable Storage
         self.vars = {}
-        self._init_variables()
         # CONTROL FLAGS
         self.running = True           # Master flag for the GUI state
         self._map_timer_id = None     # To track and cancel the map loop
@@ -32,50 +31,45 @@ class ModernBotGUI:
         self.slot_preview_label = None
         self._current_preview_image = None  # Prevents pyimage error
         self._preview_timer = None          # Prevents AttributeError
-        
-        # Build UI
-        self._build_ui()
+
 
         # Start Loops
+        self._update_map_loop()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+    def setup_vars_and_ui(self):
+        """Called by Bot after it creates its Tkinter variables"""
+        self._init_variables()  # 1. Links self.vars['attack'] = bot.attack
+        self._build_ui()        # 2. Creates tabs (this looks into self.vars)
         self._update_map_loop()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _init_variables(self):
         """
-        Binds GUI variables directly to the Bot object.
+        Links GUI variables to the pre-existing Var objects on the Bot.
         """
-        # Boolean Variables
-        bool_keys = [
+        # Map bot attributes to self.vars for GUI widget use
+        keys = [
             'loop', 'attack', 'attack_spells', 'hp_heal', 'mp_heal', 
             'manual_loot', 'cavebot', 'res', 'follow_party', 'use_area_rune', 
             'manage_equipment', 'loot_on_spot', 'amp_res', 'show_area_rune_target',
-            'use_utito'
-        ]
-        for key in bool_keys:
-            val = getattr(self.bot, key, False)
-            if hasattr(val, 'get'): val = val.get()
-            
-            var = ctk.BooleanVar(value=bool(val))
-            self.vars[key] = var
-            var.trace_add('write', lambda *a, k=key, v=var: setattr(self.bot, k, v))
-            setattr(self.bot, key, var)
-
-        # Integer Variables (With Validation)
-        int_keys = [
+            'use_utito', 'use_haste', 'use_food',
             'hp_thresh_high', 'hp_thresh_low', 'mp_thresh', 
             'min_monsters_around_spell', 'min_monsters_for_rune',
-            'kill_amount', 'kill_stop_amount'
+            'kill_amount', 'kill_stop_amount',
+            'party_leader', 'waypoint_folder'
         ]
-        for key in int_keys:
-            val = getattr(self.bot, key, 0)
-            if hasattr(val, 'get'): val = val.get()
-
-            var = ctk.StringVar(value=str(val)) 
-            self.vars[key] = var
-            var.trace_add('write', lambda *a, k=key, v=var: self._validate_and_set_int(k, v))
+        
+        for key in keys:
+            bot_var = getattr(self.bot, key)
+            self.vars[key] = bot_var
             
-            bot_int_var = ctk.IntVar(value=val)
-            setattr(self.bot, key, bot_int_var)
+            # Setup trace so the GUI updates the bot's internal profile dictionary live
+            # (Matches your existing saving logic)
+            def trace_callback(*args, k=key, v=bot_var):
+                # Integer and string vars update s[json_key] inside save_config
+                pass 
+                
+            bot_var.trace_add('write', trace_callback)
 
         # String Variables
         str_keys = ['party_leader', 'waypoint_folder']
@@ -106,8 +100,23 @@ class ModernBotGUI:
         ctk.CTkLabel(header, text=f"{self.char_name}", font=("Segoe UI", 20, "bold")).pack(side="left")
         ctk.CTkLabel(header, text=f" [{self.vocation.upper()}]", font=("Segoe UI", 16), text_color="gray").pack(side="left", padx=5)
         
-        ctk.CTkButton(header, text="Update Vision", width=100, height=28, 
-                      command=self.bot.updateAllElements).pack(side="right")
+        ctk.CTkButton(
+            header,
+            text="Save Config",
+            width=100,
+            height=28,
+            command=self.save_config,
+            fg_color="#006400",
+            hover_color="#008000",
+        ).pack(side="right", padx=(0, 8))
+
+        ctk.CTkButton(
+            header,
+            text="Update Vision",
+            width=100,
+            height=28,
+            command=self.bot.updateAllElements
+        ).pack(side="right")
 
         # 2. Tabs
         self.tabs = ctk.CTkTabview(self.root)
@@ -156,12 +165,15 @@ class ModernBotGUI:
         f_spells = self._create_section(scroll, "Area Spells")
         self._entry_row(f_spells, "Min Monsters to Cast:", "min_monsters_around_spell")
         
-        f_tools = self._create_section(scroll, "Utility Spells")
-        self._switch(f_tools, "Equip/Unequip Rings", "manage_equipment")
-        
+        f_tools = self._create_section(scroll, "Utility")
+        self._switch(f_tools, "Use Haste", "use_haste")
+        self._switch(f_tools, "Use Food", "use_food")
+        self._switch(f_tools, "Equip/Unequip Equipment", "manage_equipment")
+
         if self.vocation == "knight":
             self._switch(f_tools, "Use Exeta Res", "res")
             self._switch(f_tools, "Use Amp Res", "amp_res")
+
 
     def _build_healing_tab(self, parent):
         f_hp = self._create_section(parent, "Health Restoration")
@@ -226,13 +238,6 @@ class ModernBotGUI:
         f_rot = self._create_section(scroll, "Attack Rotations (Comma Separated)")
         self._list_entry(f_rot, "Area Spells:", "area_spells_slots")
         self._list_entry(f_rot, "Target Spells:", "target_spells_slots")
-
-        # SAVE BUTTON
-        save_btn = ctk.CTkButton(scroll, text="SAVE CONFIGURATION", 
-                      command=self.save_config, 
-                      fg_color="#006400", hover_color="#008000",
-                      height=40, font=("Segoe UI", 14, "bold"))
-        save_btn.pack(fill="x", padx=20, pady=20)
 
     def _build_cavebot_tab(self, parent):
         f_nav = self._create_section(parent, "Navigation")
@@ -331,14 +336,15 @@ class ModernBotGUI:
                 raw = var.get()
                 new_list = [int(x.strip()) for x in raw.split(',') if x.strip().isdigit()]
                 
-                # 2. Update Runtime Bot Attribute
+                # 2. Update Runtime Bot Attribute (Immediate effect)
                 setattr(self.bot, attr_name, new_list)
                 
-                # 3. Update JSON Dictionary Structure
+                # 3. Update JSON Profile Structure (For saving)
+                # CHANGE: Use 'profile' instead of 'preset'
                 if "area" in attr_name: 
-                    self.bot.preset["spells"]["area_slots"] = new_list
+                    self.bot.profile["spells"]["area_slots"] = new_list
                 elif "target" in attr_name: 
-                    self.bot.preset["spells"]["target_slots"] = new_list
+                    self.bot.profile["spells"]["target_slots"] = new_list
                     
             except Exception as e:
                 print(f"List update error: {e}")
@@ -425,44 +431,49 @@ class ModernBotGUI:
 
     # --- SAVE CONFIG ---
     def save_config(self):
-        """Saves current state to JSON via ConfigManager"""
-        
-        # 1. Sync Settings (Thresholds, Booleans)
-        s = self.bot.preset["settings"]
-        
-        # Define keys that MUST be integers
-        integer_keys = [
-            'hp_thresh_high', 'hp_thresh_low', 'mp_thresh', 
-            'min_monsters_spell', 'min_monsters_rune',
-            'kill_amount', 'kill_stop_amount'
-        ]
+        """Saves current state to JSON via ConfigManager (char + vocation key)."""
 
+        # 1) Ensure structure exists
+        self.bot.profile.setdefault("settings", {})
+        self.bot.profile.setdefault("slots", {})
+        self.bot.profile.setdefault("spells", {"area_slots": [], "target_slots": []})
+
+        s = self.bot.profile["settings"]
+
+        integer_keys = {
+            "hp_thresh_high", "hp_thresh_low", "mp_thresh",
+            "min_monsters_spell", "min_monsters_rune",
+            "kill_amount", "kill_stop_amount",
+        }
+
+        # 2) Sync GUI vars -> profile["settings"]
         for key, var in self.vars.items():
             val = var.get()
-            json_key = key # Default mapping
-            
-            # Map GUI keys back to JSON keys
-            if key == "min_monsters_around_spell": json_key = "min_monsters_spell"
-            elif key == "min_monsters_for_rune": json_key = "min_monsters_rune"
-            
-            # Update the settings dict
-            if json_key in s or json_key in integer_keys:
-                if isinstance(val, bool):
-                    s[json_key] = val
-                elif json_key in integer_keys:
-                    # Parse int safely
+
+            json_key = key
+            if key == "min_monsters_around_spell":
+                json_key = "min_monsters_spell"
+            elif key == "min_monsters_for_rune":
+                json_key = "min_monsters_rune"
+
+            if isinstance(val, bool):
+                s[json_key] = val
+            else:
+                if json_key in integer_keys:
                     s[json_key] = int(val) if str(val).isdigit() else 0
                 else:
                     s[json_key] = val
 
-        # 2. Sync Slots
-        self.bot.preset["slots"] = self.bot.slots
+        # 3) Sync runtime structures -> profile
+        self.bot.profile["slots"] = dict(self.bot.slots)
+        self.bot.profile["spells"]["area_slots"] = list(getattr(self.bot, "area_spells_slots", []))
+        self.bot.profile["spells"]["target_slots"] = list(getattr(self.bot, "target_spells_slots", []))
 
-        # 3. Commit to File
-        self.bot.config.data["presets"][self.bot.vocation] = self.bot.preset
-        self.bot.config.save()
-        
-        print(f"[GUI] Saved configuration for {self.bot.vocation} to JSON.")
+        # 4) Commit to file (NEW signature: char + vocation)
+        self.bot.config.update_config(self.bot.character_name, self.bot.vocation, self.bot.profile)
+
+        print(f"[GUI] Saved configuration for {self.bot.character_name} ({self.bot.vocation}) to JSON.")
+
 
     # --- MAP LOOP ---
     def _update_map_loop(self):
@@ -492,7 +503,10 @@ class ModernBotGUI:
 
     def _on_close(self):
         print("[GUI] Shutting down...")
-        
+        try:
+            self.save_config()
+        except:
+            pass
         # 1. Stop logical loops
         self.running = False
         self.bot.loop.set(False)

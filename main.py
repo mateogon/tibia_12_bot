@@ -26,6 +26,7 @@ import data
 import image as img
 import detect_monsters as dm
 import config_manager as cm
+from constants import BotConstants
 from screen_elements import *
 from window_interaction import *
 from extras import *
@@ -40,238 +41,175 @@ from bg_capture import BackgroundFrameGrabber
 class Bot:
     
     def __init__(self):
+        # 1. System & Character Setup
+        self._setup_system()
+        
+        # 2. Config & Profile Loading
+        self.config = cm.ConfigManager()
+        char_info = self.config.get_character_info(self.character_name)
+        self.vocation = char_info["vocation"]
+        self.areaspell_area = char_info["spell_area"]
+        self.profile = self.config.get_config(self.character_name, self.vocation)
+        
+        # --- DATA MUST BE READY BEFORE GUI BUILDS ---
+        self.slots = self.profile["slots"]
+        self.area_spells_slots = self.profile["spells"]["area_slots"]
+        self.target_spells_slots = self.profile["spells"]["target_slots"]
+        
+        # 3. GUI Initialization (Creates the Root Window)
+        self.GUI = ModernBotGUI(self, self.character_name, self.vocation)
+        
+        # 4. Initialize Bot Variables (Bridge logic)
+        self._init_bot_vars(self.profile["settings"])
+
+        # 5. Initialize Components (Screen elements, queues)
+        self._init_screen_elements()
+        self._init_queues_and_states()
+        self._init_timers()
+
+        # 6. FINALIZE GUI (This builds the tabs that need self.slots)
+        # We call this LAST because now the bot has everything defined
+        self.GUI.setup_vars_and_ui()
+
+    def _setup_system(self):
         self.base_directory = os.getcwd()
         self.hwnd = choose_capture_window()
         self.bg = BackgroundFrameGrabber(self.hwnd, max_fps=50)
         self.character_name = self.getCharacterName()
-        if (self.character_name == None):
-            print("You are not logged in.")
-            exit()
-            
-        client_rect = win32gui.GetClientRect(self.hwnd)
-        self.width = client_rect[2]
-        self.height = client_rect[3]
-        self.left, self.top, self.right, self.bottom = win32gui.GetWindowRect(self.hwnd)
-
-        #self.height = abs(self.bottom - self.top)
-        #self.width = abs(self.right - self.left)
-        #green (0, 192, 0)
-        #light green (96,192,96)
-        #yellow (192,192,0)
-        #light red (192, 0, 0)
-        #red (192, 48, 48)f
-        #dark red (96, 0, 0)
         
-        self.hp_colors =((0, 192, 0),(96,192,96),(192,192,0),(192, 0, 0),(192, 48, 48),(96, 0, 0),(192, 192, 192))
-        self.low_hp_colors = ((192,192,0),(192, 0, 0),(192, 48, 48),(96, 0, 0))
-        
-        self.party_colors = {"cross": {"leader2" :(190, 137, 26) ,"leader": (242, 9, 3), "follower":(255, 4, 1)},
-                             "check": {"leader2" :(255, 149, 16) ,"leader": (27, 254, 21), "follower":(13, 255, 11)}}
-        self.party_colors_current = "cross"
-
-        # region Scren Elements Init
-        self.s_Stop = ScreenElement("Stop",self.hwnd,'stop.png',lambda w,h: (w - 200, 0 , w, int(h/2)))
-        
-        self.s_ActionBar = BoundScreenElement("ActionBar",self.hwnd,'action_bar_start.png','action_bar_end.png',lambda w,h: (0, int(h/4), int(w/3), h),lambda w,h: (int(2*w/3), int(h/4), w, h),(2,0))
-        self.s_GameScreen = GameScreenElement("GameScreen",self.hwnd,'hp_start.png','action_bar_end.png',lambda w,h: (150, 0, 300, 150),lambda w,h: (int(2*w/3), int(h/4), w, h),(2,0))
-
-        self.s_BattleList = ScreenWindow("BattleList",self.hwnd,'battle_list.png',2)
-        self.s_Skills = ScreenWindow("Skills",self.hwnd,'skills.png',1)
-        self.s_Party = ScreenWindow("Party",self.hwnd,'party_list.png',10)
-        
-        self.s_Map = RelativeScreenElement("Map",self.hwnd,self.s_Stop,(-118,-259,-52,-161)) #
-        self.s_Bless = RelativeScreenElement("Bless",self.hwnd,self.s_Stop,(-104,-144,-135,-147))
-        self.s_Buffs = RelativeScreenElement("Buffs",self.hwnd,self.s_Stop,(-118,0,-53,-1))
-        self.s_Health = RelativeScreenElement("Health",self.hwnd,self.s_Stop,(-103,+18,-53,+14))
-        self.s_Mana = RelativeScreenElement("Mana",self.hwnd,self.s_Stop,(-103,+31,-53,+27))
-        self.s_Capacity = RelativeScreenElement("Capacity",self.hwnd,self.s_Stop,(-45,-13,-52,-15))
-        self.s_WindowButtons = RelativeScreenElement("WindowButtons",self.hwnd,self.s_Stop,(-118,71,-52,164))
-        
-        self.ScreenElements = [self.s_Stop]
-        self.BoundScreenElements = [self.s_GameScreen,self.s_ActionBar]
-        self.ScreenWindows = [self.s_BattleList,self.s_Skills,self.s_Party]
-        self.RelativeScreenElements = [self.s_Map,self.s_Bless,self.s_Buffs,self.s_Health,self.s_Mana,self.s_Capacity,self.s_WindowButtons]
-        #element order is important
-        self.ElementsLists = [self.ScreenElements,self.BoundScreenElements,self.RelativeScreenElements,self.ScreenWindows,]
-        self.action_bar_anchor_pos = None # Will store the stable (x, y) of the action bar's start image.
-        # endregion
-        
-        #GUI variables
-        self.loop = True
-        self.cavebot = False
-        self.attack = True
-        self.attack_spells = True
-        self.check_monster_queue = True
-        self.res = False
-        self.amp_res = False
-        self.follow_party = False
-        self.hp_heal = True
-        self.mp_heal = True
-        
-        self.use_haste = True
-        self.use_food = False
-        
-        self.manage_equipment = False
-        self.use_ring = False
-        self.use_amulet = False
-        self.loot_on_spot = False
-        self.single_spot_hunting = False
-        self.waypoint_folder = "test"
-        self.hppc = 100
-        self.mppc = 100
-        
-        self.ElementsLists = [self.ScreenElements,self.BoundScreenElements,self.RelativeScreenElements,self.ScreenWindows,]
-        self.action_bar_anchor_pos = None 
-
-        # --- NEW CONFIGURATION SYSTEM ---
-        # 1. Initialize Config Manager
-        self.config = cm.ConfigManager()
-        
-        # 2. Identify Character & Load Data
-        self.character_name = self.getCharacterName()
         if self.character_name is None:
             print("You are not logged in.")
             exit()
+            
+        rect = win32gui.GetClientRect(self.hwnd)
+        self.width, self.height = rect[2], rect[3]
+        self.left, self.top, self.right, self.bottom = win32gui.GetWindowRect(self.hwnd)
+        
+        # Static Data
+        self.hp_colors = BotConstants.HP_COLORS
+        self.low_hp_colors = BotConstants.LOW_HP_COLORS
+        self.party_colors = BotConstants.PARTY_COLORS
+        self.party_colors_current = "cross"
 
-        char_data = self.config.get_character(self.character_name)
-        self.vocation = char_data["vocation"]
-        self.areaspell_area = char_data["spell_area"]
-        self.party_leader = char_data.get("party_leader", "") # Default to empty if not set
+    def _init_screen_elements(self):
+        # Base Elements
+        self.s_Stop = ScreenElement("Stop", self.hwnd, 'stop.png', 
+                                    lambda w, h: (w - 200, 0, w, int(h / 2)))
         
-        # 3. Load Vocation Preset
-        self.preset = self.config.get_preset(self.vocation)
+        # Bound Elements
+        self.s_ActionBar = BoundScreenElement("ActionBar", self.hwnd, 'action_bar_start.png', 'action_bar_end.png', 
+                                              lambda w, h: (0, h//4, w//3, h), 
+                                              lambda w, h: (2*w//3, h//4, w, h), (2, 0))
         
-        # 4. LOAD SLOTS (The Action Bar mapping)
-        self.slots = self.preset["slots"]
+        self.s_GameScreen = GameScreenElement("GameScreen", self.hwnd, 'hp_start.png', 'action_bar_end.png', 
+                                              lambda w, h: (150, 0, 300, 150), 
+                                              lambda w, h: (2*w//3, h//4, w, h), (2, 0))
+
+        # Window Elements
+        self.s_BattleList = ScreenWindow("BattleList", self.hwnd, 'battle_list.png', 2)
+        self.s_Skills = ScreenWindow("Skills", self.hwnd, 'skills.png', 1)
+        self.s_Party = ScreenWindow("Party", self.hwnd, 'party_list.png', 10)
         
-        # Load Spell Rotations (Lists of slots)
-        self.area_spells_slots = self.preset["spells"]["area_slots"]
-        self.target_spells_slots = self.preset["spells"]["target_slots"]
-        
-        # 5. LOAD SETTINGS (With defaults if missing)
-        s = self.preset["settings"]
-        
-        # -- Thresholds --
-        self.hp_thresh_high = int(s.get("hp_thresh_high", 90))
-        self.hp_thresh_low = int(s.get("hp_thresh_low", 70))
-        self.mp_thresh = int(s.get("mp_thresh", 30))
-        
-        # -- Combat Logic --
-        self.min_monsters_around_spell = int(s.get("min_monsters_spell", 1))
-        self.min_monsters_for_rune = int(s.get("min_monsters_rune", 1))
-        self.attack_spells = s.get("attack_spells", True)
-        self.res = s.get("res", False)
-        self.amp_res = s.get("amp_res", False)
-        self.use_utito = s.get("use_utito", False)
-        self.use_area_rune = s.get("use_area_rune", False)
-        
-        # -- Toggles --
-        self.hp_heal = True
-        self.mp_heal = True
-        self.loop = True
-        self.attack = True
-        self.cavebot = False
-        self.follow_party = False
-        self.manual_loot = False
-        self.loot_on_spot = False
-        self.manage_equipment = False
-        self.show_area_rune_target = True
-        
-        # -- Internal Timers & Queues --
-        self.party = {}
-        self.party_positions = []
+        # Relative Elements (using constants for offsets)
+        off = BotConstants.OFFSETS
+        self.s_Map = RelativeScreenElement("Map", self.hwnd, self.s_Stop, off["Map"])
+        self.s_Bless = RelativeScreenElement("Bless", self.hwnd, self.s_Stop, off["Bless"])
+        self.s_Buffs = RelativeScreenElement("Buffs", self.hwnd, self.s_Stop, off["Buffs"])
+        self.s_Health = RelativeScreenElement("Health", self.hwnd, self.s_Stop, off["Health"])
+        self.s_Mana = RelativeScreenElement("Mana", self.hwnd, self.s_Stop, off["Mana"])
+        self.s_Capacity = RelativeScreenElement("Capacity", self.hwnd, self.s_Stop, off["Capacity"])
+        self.s_WindowButtons = RelativeScreenElement("WindowButtons", self.hwnd, self.s_Stop, off["WindowButtons"])
+
+        # Grouping
+        self.ScreenElements = [self.s_Stop]
+        self.BoundScreenElements = [self.s_GameScreen, self.s_ActionBar]
+        self.ScreenWindows = [self.s_BattleList, self.s_Skills, self.s_Party]
+        self.RelativeScreenElements = [self.s_Map, self.s_Bless, self.s_Buffs, self.s_Health, self.s_Mana, self.s_Capacity, self.s_WindowButtons]
+        self.ElementsLists = [self.ScreenElements, self.BoundScreenElements, self.RelativeScreenElements, self.ScreenWindows]
+        self.action_bar_anchor_pos = None
+
+    def _init_queues_and_states(self):
+        self.hppc, self.mppc = 100, 100
+        self.hp_queue = deque([100, 100, 100], maxlen=3)
+        self.monster_queue = deque([0]*10, maxlen=10)
+        self.monster_queue_time = 0
+        self.party, self.party_positions = {}, []
         self.monster_positions = []
         self.monsters_around = 0
-        
-        # HP History (Burst Calc)
-        self.hp_queue = deque([], maxlen=3)
-        for i in range(0, 3): self.hp_queue.append(100)
-            
-        # Monster History
-        self.monster_queue_time = 0
-        self.monster_queue = deque([], maxlen=10)
-        for i in range(0, 10): self.monster_queue.append(0)
-            
         self.buffs = {}
         self.last_attack_time = timeInMillis()
-        
-        # Delays
-        self.normal_delay = getNormalDelay()
-        self.delays = DelayManager(default_jitter_ms_fn=getNormalDelay)
-        self.attack_click_delay_ms = 120
-        self.delays.set_default("attack_click", self.attack_click_delay_ms)
-        self.exeta_res_cast_time = 3
-        self.amp_res_cast_time = 6
-        self.delays.set_default("attack_click", 120)
-        self.delays.set_default("area_rune", 1100)
-        self.delays.set_default("equip_cycle", 200)
-        self.delays.set_default("lure_stop", 250)
-        self.delays.set_default("follow_retry", 2500)
-        self.delays.set_default("exeta_res", 3000)
-        self.delays.set_default("amp_res", 6000)
-        self.delays.set_default("utito", 10000)
-        
-        # Trigger initial delays
-        self.delays.trigger("equip_cycle")
-        self.delays.trigger("lure_stop")
-        self.delays.trigger("walk", base_ms=200)
-
-        # Configs that didn't fit in preset or are global
-        self.check_spell_cooldowns = True
-        self.check_monster_queue = True
-        self.area_rune_delay_ms = 1100
-        self.area_rune_target_click_delay_s = 0.08
-        self.safe_mp_thresh = self.mp_thresh + 15
-        
-        # Equipment Slot Definitions (Fixed by Game Client)
-        self.weapon_slot = self.slots.get("weapon", 18)
-        self.helmet_slot = self.slots.get("helmet", 17)
-        self.armor_slot = self.slots.get("armor", 19)
-        self.shield_slot = self.slots.get("shield", 22)
-        self.amulet_slot = self.slots.get("amulet", 20)
-        self.ring_slot = self.slots.get("ring", 21)
-        self.equipment_slots = [self.weapon_slot, self.helmet_slot, self.armor_slot, self.amulet_slot, self.ring_slot, self.shield_slot]
+        self.slot_status = [False] * 32
         self.magic_shield_enabled = False
-        self.slot_status = [False] * 30
+        self.key_pressed = False
         
-        # Cavebot defaults
-        self.kill_amount = 5
-        self.kill_stop_amount = 1
+        # --- MISSING LOGIC FLAGS ---
+        self.check_spell_cooldowns = True  # FIX: Define the missing attribute
+        self.check_monster_queue = True
+        self.area_rune_target_click_delay_s = 0.08
+        # ---------------------------
+
+        self.kill, self.lure = False, False
+        self.kill_start_time = time.time()
         self.kill_stop_time = 120
         self.lure_amount = 2
-        self.kill = False
-        self.kill_start_time = time.time()
-        self.lure = False
-        self.waypoint_folder = "test"
-        
-        # Marks
         self.mark_list = ["skull", "lock", "cross"]
         self.current_mark_index = 0
-        self.current_mark = self.mark_list[self.current_mark_index]
+        self.current_mark = self.mark_list[0]
         self.previous_marks = {mark: False for mark in self.mark_list}
+    
+    def _init_timers(self):
+        self.normal_delay = getNormalDelay()
+        self.delays = DelayManager(default_jitter_ms_fn=getNormalDelay)
         
-        self.chat_status_region = False
-        self.current_map_image = None
-        self.key_pressed = False
-
-        # GUI Init
-        self.GUI = ModernBotGUI(self, self.character_name, self.vocation)
+        # Internal Values
+        self.safe_mp_thresh = self.mp_thresh.get() + 15
         self.follow_retry_delay = 2.5
-
-        # Centralized timers (seed throttles to avoid immediate spam on start)
-        self.delays.set_default("area_rune", self.area_rune_delay_ms, jitter_ms_fn=getNormalDelay)
+        
+        # Defaults
+        self.delays.set_default("attack_click", 120)
+        self.delays.set_default("area_rune", 1100, jitter_ms_fn=getNormalDelay)
         self.delays.set_default("equip_cycle", 200)
         self.delays.set_default("lure_stop", 250)
         self.delays.set_default("follow_retry", int(self.follow_retry_delay * 1000))
-        self.delays.set_default("exeta_res", int(self.exeta_res_cast_time * 1000))
-        self.delays.set_default("amp_res", int(self.amp_res_cast_time * 1000))
-        self.delays.set_default("utito", 10_000)
+        self.delays.set_default("exeta_res", 3000)
+        self.delays.set_default("amp_res", 6000)
+        self.delays.set_default("utito", 10000)
 
-        self.delays.trigger("equip_cycle")
-        self.delays.trigger("lure_stop")
+        # Immediate Triggers
+        for timer in ["equip_cycle", "lure_stop", "exeta_res", "amp_res"]:
+            self.delays.trigger(timer)
         self.delays.trigger("walk", base_ms=200)
-        self.delays.trigger("exeta_res")
-        self.delays.trigger("amp_res")
+
+    def _init_bot_vars(self, s):
+        """Helper to create Tkinter variables after root window exists"""
+        self.attack           = BooleanVar(value=s.get("attack", True))
+        self.loop             = BooleanVar(value=s.get("loop", True))
+        self.attack_spells    = BooleanVar(value=s.get("attack_spells", True))
+        self.hp_heal          = BooleanVar(value=s.get("hp_heal", True))
+        self.mp_heal          = BooleanVar(value=s.get("mp_heal", True))
+        self.cavebot          = BooleanVar(value=s.get("cavebot", False))
+        self.follow_party     = BooleanVar(value=s.get("follow_party", False))
+        self.manual_loot      = BooleanVar(value=s.get("manual_loot", False))
+        self.loot_on_spot     = BooleanVar(value=s.get("loot_on_spot", False))
+        self.manage_equipment = BooleanVar(value=s.get("manage_equipment", False))
+        self.use_area_rune    = BooleanVar(value=s.get("use_area_rune", False))
+        self.show_area_rune_target = BooleanVar(value=s.get("show_area_rune_target", True))
+        self.use_utito        = BooleanVar(value=s.get("use_utito", False))
+        self.res              = BooleanVar(value=s.get("res", False))
+        self.amp_res          = BooleanVar(value=s.get("amp_res", False))
+        self.use_haste        = BooleanVar(value=s.get("use_haste", True))
+        self.use_food         = BooleanVar(value=s.get("use_food", True))
+
+        self.hp_thresh_high        = IntVar(value=int(s.get("hp_thresh_high", 90)))
+        self.hp_thresh_low         = IntVar(value=int(s.get("hp_thresh_low", 70)))
+        self.mp_thresh             = IntVar(value=int(s.get("mp_thresh", 30)))
+        self.min_monsters_around_spell = IntVar(value=int(s.get("min_monsters_spell", 1)))
+        self.min_monsters_for_rune = IntVar(value=int(s.get("min_monsters_rune", 1)))
+        self.kill_amount           = IntVar(value=int(s.get("kill_amount", 5)))
+        self.kill_stop_amount      = IntVar(value=int(s.get("kill_stop_amount", 1)))
+
+        self.party_leader    = StringVar(value=str(s.get("party_leader", "")))
+        self.waypoint_folder = StringVar(value=str(s.get("waypoint_folder", "test")))
 
     def _bool_value(self, v):
         try:
@@ -854,14 +792,19 @@ class Bot:
         return max(val)
     
     def manageMagicShield(self):
-        if self.vocation == "druid" or self.vocation == "sorcerer":
+        if self.vocation in ["druid", "sorcerer"]:
+            ms_slot = self.slots.get("magic_shield")
+            cancel_slot = self.slots.get("cancel_magic_shield")
+            
+            if ms_slot is None or cancel_slot is None: return
+
             if self.hppc <= self.hp_thresh_low.get() or self.getBurstDamage() > 40:
-                if self.slot_status[self.slots.get("magic_shield")] and not self.magic_shield_enabled:
-                    self.clickActionbarSlot(self.slots.get("magic_shield"))
+                if self.slot_status[ms_slot] and not self.magic_shield_enabled:
+                    self.clickActionbarSlot(ms_slot)
                     self.magic_shield_enabled = True
             else:
                 if self.magic_shield_enabled and self.monsterCount() == 0:
-                    self.clickActionbarSlot(self.slots.get("cancel_magic_shield"))
+                    self.clickActionbarSlot(cancel_slot)
                     self.magic_shield_enabled = False
     
     def manageHealth(self):
@@ -1779,8 +1722,8 @@ class Bot:
 
         # 3. Don't interrupt attack unless necessary
         # If we are attacking and the user wants to prioritize attack, skip follow logic
-        if self.attack and self.isAttacking():
-             return
+        if self._bool_value(self.attack) and self.isAttacking():
+            return
 
         print("[DEBUG] Auto-Follow triggered...")
         
@@ -1908,11 +1851,12 @@ class Bot:
 
                 # Match against known list
                 name_found = False
-                for n in self.player_list.keys():   
+                # FIX: use self.config.data["characters"]
+                for n in self.config.data.get("characters", {}).keys():   
                     if (similarString(raw_name, n)):
                         name = n
                         name_found = True
-                        break 
+                        break
                 
                 if not name_found:
                     print(f"[DEBUG OCR FAIL] Could not match '{raw_name}' to any known player.")
@@ -2426,9 +2370,9 @@ if __name__ == "__main__":
             #else:
             #    bot.cavebot_distance()
         times[7] = timeInMillis()
-        if bot.use_haste:
+        if bot._bool_value(bot.use_haste):
             bot.haste()
-        if bot.use_food:
+        if bot._bool_value(bot.use_food):
             bot.eat()
         times[8] = timeInMillis()
         if bot.manage_equipment.get():
