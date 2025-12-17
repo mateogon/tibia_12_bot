@@ -133,6 +133,7 @@ class Bot:
         self.hp_queue = deque([100, 100, 100], maxlen=3)
         self.monster_queue = deque([0]*10, maxlen=10)
         self.monster_queue_time = 0
+        self.monster_count = 0
         self.party, self.party_positions = {}, []
         self.monster_positions = []
         self.monsters_around = 0
@@ -156,6 +157,16 @@ class Bot:
         self.current_mark_index = 0
         self.current_mark = self.mark_list[0]
         self.previous_marks = {mark: False for mark in self.mark_list}
+
+        # Lógica de Lure
+        self.lure_stutter_active = False
+        self.last_lure_action_time = time.time()
+        self.lure_phase = "walking" # "walking" o "stopping"
+        
+        # Tiempos configurables (ms)
+        self.lure_walk_duration = 0.6  # Segundos caminando
+        self.lure_stop_duration = 0.4  # Segundos parado
+
     
     def _init_timers(self):
         self.normal_delay = getNormalDelay()
@@ -174,6 +185,7 @@ class Bot:
         self.delays.set_default("exeta_res", 3000)
         self.delays.set_default("amp_res", 6000)
         self.delays.set_default("utito", 10000)
+        self.delays.set_default("centering", 800) # Only recenter every 1.5s
 
         # Immediate Triggers
         for timer in ["equip_cycle", "lure_stop", "exeta_res", "amp_res"]:
@@ -188,6 +200,9 @@ class Bot:
         self.hp_heal          = BooleanVar(value=s.get("hp_heal", True))
         self.mp_heal          = BooleanVar(value=s.get("mp_heal", True))
         self.cavebot          = BooleanVar(value=s.get("cavebot", False))
+        self.use_lure_walk = BooleanVar(value=s.get("use_lure_walk", False))
+        self.lure_walk_ms  = IntVar(value=int(s.get("lure_walk_ms", 600)))
+        self.lure_stop_ms  = IntVar(value=int(s.get("lure_stop_ms", 400)))
         self.follow_party     = BooleanVar(value=s.get("follow_party", False))
         self.manual_loot      = BooleanVar(value=s.get("manual_loot", False))
         self.loot_on_spot     = BooleanVar(value=s.get("loot_on_spot", False))
@@ -1019,56 +1034,39 @@ class Bot:
         cv2.waitKey(0)
         cv2.destroyAllWindows()
 
-    def clickAttack(self):
+    def clickAttack(self, force=False):
         """
-        Scans the Battle List for a valid target (Black Pixel check).
-        Optimized to use a single screenshot + NumPy array lookup.
+        Scans the Battle List for a valid target.
+        force: If True, bypasses the delay check (used for stutter-walk recovery).
         """
-        
-        # 1. Checks: Don't attack if already attacking or in PZ
-        if self.isAttacking() or self.buffs.get('pz', False):
+        # 1. Checks: Don't attack if in PZ
+        if self.buffs.get('pz', False):
             return
-        if not self.delays.due("attack_click"):
-            return
+            
+        # Only check delay if we are NOT forcing the attack
+        if not force:
+            if self.isAttacking() or not self.delays.due("attack_click"):
+                return
 
-        # 2. Capture the Battle List region
+        # 2. Capture and Scan (Rest of your existing logic...)
         region = self.s_BattleList.region
         image = img.screengrab_array(self.hwnd, region)
-        
-        if image is None:
-            return
+        if image is None: return
 
         height, width, _ = image.shape
+        rel_x, start_y, step_y = 25, 30, 22
 
-        # 3. Define Offsets (based on your original code)
-        # Original: x = _x + 25, first_pos = _y + 30, d = 22
-        rel_x = 25
-        start_y = 30
-        step_y = 22
-        # 4. Iterate through the slots using the image array
         for rel_y in range(start_y, height, step_y):
-            
-            # Safety bound check
-            if rel_y >= height or rel_x >= width:
-                break
-
-            # Get the pixel color from the array (Instant)
-            # OpenCV images are BGR. Black is [0, 0, 0] in both.
+            if rel_y >= height or rel_x >= width: break
             pixel = image[rel_y, rel_x]
 
-            # Check if pixel is pure black [0, 0, 0]
-            # We use np.array_equal or simple comparisons for speed
             if pixel[0] == 0 and pixel[1] == 0 and pixel[2] == 0:
-                
-                # Calculate Absolute Screen Coordinates for the click
-                abs_x = region[0] + rel_x
-                abs_y = region[1] + rel_y
-                print("Clicking target at:", abs_x, abs_y)
+                abs_x, abs_y = region[0] + rel_x, region[1] + rel_y
                 click_client(self.hwnd, abs_x, abs_y)
                 self.delays.trigger("attack_click")
-                
-                # Stop after clicking the first valid target
                 return
+            
+
     def stopAttacking(self):
         b_x, b_y,_,b_y2 = self.s_BattleList.region
         #w, h = self.s_BattleList.getWidth(),self.s_BattleList.getHeight()
@@ -1456,85 +1454,32 @@ class Bot:
                 #img.visualize_fast(image)
                 rclick_client(self.hwnd,pos[0],pos[1])
     
-    
-    def attackSpells(self):
-        # 1. Safety Checks
-        if self.buffs.get('pz', False) or self.monsterCount() == 0:
+    def manageKnightSupport(self):
+        if self.vocation != "knight":
             return
 
-        # 2. Global Cooldown / Delay Check
-        cur_sleep = timeInMillis() - self.last_attack_time
-        if (timeInMillis() - cur_sleep <= (100 + self.normal_delay)):
-            return
+        # Buff de Daño (Utito Tempo)
+        if self._bool_value(self.use_utito):
+            self.utito() # Este método ya tiene su propio delay interno de 10s
 
-        # 3. Update State
-        # (Get accurate count for spells)
+        # Actualizar monstruos alrededor (usando el área de hechizos configurada)
         self.monsters_around = self.getMonstersAround(self.areaspell_area, True, True)
         self.monster_count = self.monsterCount()
 
-        # 4. Maintain Monster Queue (Preserved from your code)
-        if time.time() - self.monster_queue_time >= 1:
-            self.monster_queue.pop()
-            self.monster_queue.appendleft(self.monsters_around)
-            self.monster_queue_time = time.time()
-
         if self.monsters_around > 0:
-            
-            # --- SUPPORT SPELLS (Exeta / Amp Res) ---
-            # Using new Slot system instead of hardcoded hotkeys
-            
-            # Exeta Res
-            if self.res.get(): 
-                # Check if we have a slot defined for 'exeta'
+            # --- Exeta Res ---
+            if self._bool_value(self.res): # Usamos _bool_value para estar seguros
                 if "exeta" in self.slots:
-                    self.castExetaRes() # Ensure castExetaRes uses self.slots['exeta'] too
+                    self.castExetaRes()
 
-            # Amp Res
-            if self.amp_res.get():
+            # --- Amp Res ---
+            if self._bool_value(self.amp_res):
                 monsters_in_melee = self.getMonstersAround(3, False, False)
-                # Logic: If we see more monsters than are in melee range, cast Amp Res
+                # Si hay más monstruos en pantalla que en cuerpo a cuerpo, traerlos
                 if monsters_in_melee < self.monster_count:
                     if "amp_res" in self.slots:
                         self.castAmpRes()
 
-            # --- ATTACK SPELL ROTATION ---
-            
-            # Condition: Kill Mode OR Enough Monsters
-            should_aoe = (self.kill and self.cavebot.get()) or \
-                         (self.monsters_around >= self.min_monsters_around_spell.get())
-            if should_aoe:
-                # Iterate through the list of Area Spell Slots (F5, F6, etc.)
-                for slot in self.area_spells_slots:
-                    if self.check_spell_cooldowns:
-                        # Only click if the slot is NOT on cooldown
-                        if self.checkActionBarSlotCooldown(slot):
-                            if self.clickActionbarSlot(slot):
-                                self.updateLastAttackTime()
-                                self.newNormalDelay()
-                                return # STOP after one successful cast (Efficient)
-                    else:
-                        # No cooldown check, just spam (Original behavior support)
-                        self.clickActionbarSlot(slot)
-                        self.updateLastAttackTime()
-                        self.newNormalDelay()
-                        return
-
-            # --- SINGLE TARGET ROTATION ---
-            elif self.monsters_around >= 1:
-                # Iterate through Single Target Slots (F8, F9, etc.)
-                for slot in self.target_spells_slots:
-                    if self.check_spell_cooldowns:
-                        if self.checkActionBarSlotCooldown(slot):
-                            if self.clickActionbarSlot(slot):
-                                self.updateLastAttackTime()
-                                self.newNormalDelay()
-                                return
-                    else:
-                        self.clickActionbarSlot(slot)
-                        self.updateLastAttackTime()
-                        self.newNormalDelay()
-                        return
-    
     def attackAreaSpells(self):
         """
         Attempts to cast Area Spells (Waves, UE).
@@ -1564,7 +1509,6 @@ class Bot:
                     if self.clickActionbarSlot(slot):
                         self.updateLastAttackTime()
                         self.newNormalDelay()
-                        print(f"[COMBAT] Cast Area Spell (Slot {slot})")
                         return True
             else:
                 self.clickActionbarSlot(slot)
@@ -1826,7 +1770,6 @@ class Bot:
                 # DEBUG: Draw Blue Circle on found separators
                 cv2.circle(full_party_img, (rel_x, rel_y), 2, (255, 0, 0), -1)
 
-        print(f"[DEBUG] Found {player_count} party members.")
 
         # 2. Scan Names
         for i in range(0, player_count):
@@ -1841,9 +1784,6 @@ class Bot:
             name_img = img.screengrab_array(self.hwnd, name_region)
             
             if name_img is not None:
-                # DEBUG: Save the exact crop we send to Tesseract
-                debug_filename = f"debug_name_crop_{i}.png"
-                cv2.imwrite(debug_filename, name_img)
                 
                 # Perform OCR
                 raw_name = img.tesser_image(name_img, 124, 255, 1, config='--psm 7')
@@ -1874,9 +1814,6 @@ class Bot:
                 rel_y2 = abs_y2 - y
                 cv2.rectangle(full_party_img, (rel_x1, rel_y1), (rel_x2, rel_y2), (0, 0, 255), 1)
 
-        # Save the full diagnostic image
-        cv2.imwrite("debug_party_scan.png", full_party_img)
-        print("[DEBUG] Saved 'debug_party_scan.png' and name crops.")
 
     def getPartyLeaderVitals(self):
         try:
@@ -1907,43 +1844,126 @@ class Bot:
 
     def cavebottest(self):
         marks = self.getClosestMarks()
-        monster_count = self.monsterCount()
         kill_time = time.time() - self.kill_start_time
-        walk_delay = 85
+        
         if self.kill:
-            if monster_count <= self.kill_stop_amount.get() or kill_time > self.kill_stop_time or (kill_time > 20 and self.monsters_around == 0): 
+            # --- TACTICAL POSITIONING ---
+            # Only EKs dive into the pack. 
+            # Mages and Paladins stay where they are (or kite).
+            if self.vocation == "knight" and self.monster_count > 1:
+                self.recenter_on_pack()
+            # ----------------------------
+
+            if self.monster_count <= self.kill_stop_amount.get() or kill_time > self.kill_stop_time:
                 if self.manual_loot.get():
-                    for i in range(0,2):
-                        self.lootAround()
-                    
+                    for i in range(0,2): self.lootAround()
                 self.kill = False
-            else:
-                #hold follow
-                pass
         else:
-            if monster_count >= self.kill_amount.get():
+            # MODO CAMINAR / LURE
+            if self.monster_count >= self.kill_amount.get():
                 self.kill = True
-                #print("enabling kill mode")
                 self.kill_start_time = time.time()
-            elif monster_count >= self.lure_amount and self.lure:
-                walk_delay = 500
-                if self.delays.allow("lure_stop"):
-                    print("luring")
-                    self.clickStop()
+                self.clickStop() # Parar inmediatamente al empezar a matar
+            
             if len(marks) == 0:
-                #print("no "+self.current_mark+ " mark found, changing to the next one")
                 self.nextMark()
             else:
-                index = 0
-                dist, pos, _ = marks[index]  # Unpack 3 values and ignore the third one
+                dist, pos, _ = marks[0]
                 if dist <= 3:
-                    #print("reached current mark")
                     self.updatePreviousMarks()
                     self.nextMark()
                 else:
-                    if self.delays.allow("walk", base_ms=walk_delay):
-                        click_client(self.hwnd,pos[0],pos[1])
-                        
+                    self.executeLureWalk(pos)
+
+    def executeLureWalk(self, mark_pos):
+        # If the setting is off or no monsters, walk normally
+        if not self.use_lure_walk.get() or self.monster_count == 0:
+            if self.delays.allow("walk", base_ms=200):
+                click_client(self.hwnd, mark_pos[0], mark_pos[1])
+            return
+
+        now = time.time()
+        elapsed_ms = (now - self.last_lure_action_time) * 1000
+
+        if self.lure_phase == "walking":
+            if elapsed_ms >= self.lure_walk_ms.get():
+                # --- THE FIX ---
+                # 1. See if we were attacking before we hit Stop
+                was_attacking = self.isAttacking()
+                
+                # 2. Stop movement (and unfortunately, attack)
+                self.clickStop()
+                
+                # 3. If we were attacking, resume IMMEDIATELY
+                if was_attacking:
+                    self.clickAttack(force=True)
+                # ---------------
+
+                self.lure_phase = "stopping"
+                self.last_lure_action_time = now
+            else:
+                # Maintain direction while walking
+                if self.delays.allow("walk", base_ms=250):
+                    click_client(self.hwnd, mark_pos[0], mark_pos[1])
+
+        elif self.lure_phase == "stopping":
+            if elapsed_ms >= self.lure_stop_ms.get():
+                self.lure_phase = "walking"
+                self.last_lure_action_time = now
+                click_client(self.hwnd, mark_pos[0], mark_pos[1])
+
+    def recenter_on_pack(self):
+        """Project centroid to the best available 8-directional tile."""
+        if not self.delays.due("centering") or not self.monster_positions:
+            return
+
+        p_center = self.s_GameScreen.getRelativeCenter()
+        tile_size = self.s_GameScreen.tile_h
+
+        # 1. Calculate Vector to Centroid
+        avg_mx = sum([m[0] for m in self.monster_positions]) / len(self.monster_positions)
+        avg_my = sum([m[1] for m in self.monster_positions]) / len(self.monster_positions)
+        
+        dx = avg_mx - p_center[0]
+        dy = avg_my - p_center[1]
+        dist = sqrt(dx**2 + dy**2)
+
+        # Only move if they are at least 1.5 tiles away (prevents 'dancing' in place)
+        if dist < (tile_size * 1.5) or dist > (tile_size * 6):
+            return
+
+        # 2. Determine Discrete Direction (-1, 0, or 1)
+        # We use a threshold (0.4) to decide if we should move in that axis
+        dir_x = 0
+        if dx > (tile_size * 0.4): dir_x = 1
+        elif dx < -(tile_size * 0.4): dir_x = -1
+
+        dir_y = 0
+        if dy > (tile_size * 0.4): dir_y = 1
+        elif dy < -(tile_size * 0.4): dir_y = -1
+
+        # 3. Target Tile Coordinates
+        target_rel_x = p_center[0] + (dir_x * tile_size)
+        target_rel_y = p_center[1] + (dir_y * tile_size)
+
+        # 4. Obstacle Check: Is there a monster on this tile?
+        for mx, my in self.monster_positions:
+            m_dist = sqrt((mx - target_rel_x)**2 + (my - target_rel_y)**2)
+            if m_dist < (tile_size * 0.5):
+                # print("[CAVEBOT] Target tile blocked by monster. Aborting step.")
+                return
+
+        # 5. Execute Discrete Step
+        gs_region = self.s_GameScreen.region
+        abs_x = int(gs_region[0] + target_rel_x)
+        abs_y = int(gs_region[1] + target_rel_y)
+
+        click_client(self.hwnd, abs_x, abs_y)
+        
+        # Resume attack
+        self.GUI.root.after(50, lambda: self.clickAttack(force=True))
+        self.delays.trigger("centering")
+
     def reset_marks_history(self):
         """Manually clears the 'visited' status of map marks."""
         print("[CAVEBOT] Resetting mark history. All marks are now fresh.")
@@ -1962,12 +1982,10 @@ class Bot:
         if monsters_inside_area >= 1:
             self.stopAttacking()
             self.attack.set(value = False)
-            print("stopping attack")
             walk = True
         else:
             time_passed = self.delays.elapsed_ms("walk")
             if time_passed > 100 and time_passed < 500 and monster_count >= 2:
-                print("clicking stop")
                 self.clickStop()
                 if not self.attack.get():
                     self.attack.set(value = True)
@@ -2327,9 +2345,12 @@ if __name__ == "__main__":
             if bot.loot_on_spot.get():
                 bot.lootAround(True)
         times[1] = timeInMillis()
-        if bot.monsterCount() > 0:
-            #print("monster count: "+str(bot.monsterCount()))
+        
+        bot.monster_count = bot.monsterCount() 
+        
+        if bot.monster_count > 0:
             bot.updateMonsterPositions()
+
         times[2] = timeInMillis()
         #bot.getMonstersAround(bot.areaspell_area,False,False)
         #if len(bot.party.keys()) > 0:w
@@ -2345,11 +2366,11 @@ if __name__ == "__main__":
         if bot.attack.get():
             bot.clickAttack()
         times[5] = timeInMillis()
-        #if bot.use_utito:
-        #    if bot.vocation == "knight":
-        #        bot.utito()
+
         times[6] = timeInMillis()
-        
+
+        bot.manageKnightSupport()
+
         # --- COMBAT LOGIC CHAIN ---
         if bot.attack_spells.get():
             # 1. Try Big Area Spells (e.g. UE/Wave) if density is high

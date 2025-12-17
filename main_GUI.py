@@ -56,7 +56,8 @@ class ModernBotGUI:
             'hp_thresh_high', 'hp_thresh_low', 'mp_thresh', 
             'min_monsters_around_spell', 'min_monsters_for_rune',
             'kill_amount', 'kill_stop_amount',
-            'party_leader', 'waypoint_folder'
+            'party_leader', 'waypoint_folder',
+            'use_lure_walk', 'lure_walk_ms', 'lure_stop_ms',
         ]
         
         for key in keys:
@@ -255,6 +256,11 @@ class ModernBotGUI:
                                   fg_color="#D2691E", hover_color="#A0522D", # Orange/Brown style
                                   command=self.bot.reset_marks_history)
         reset_btn.pack(side="right")
+
+        f_lure = self._create_section(parent, "Lure / Stutter Walk")
+        self._switch(f_lure, "Enable Lure Stutter", "use_lure_walk")
+        self._entry_row(f_lure, "Walk Duration (ms):", "lure_walk_ms")
+        self._entry_row(f_lure, "Stop Duration (ms):", "lure_stop_ms")
         # -------------------------------------------------
 
         self._switch(f_nav, "Follow Party Leader", "follow_party")
@@ -444,6 +450,7 @@ class ModernBotGUI:
             "hp_thresh_high", "hp_thresh_low", "mp_thresh",
             "min_monsters_spell", "min_monsters_rune",
             "kill_amount", "kill_stop_amount",
+            "lure_walk_ms", "lure_stop_ms",
         }
 
         # 2) Sync GUI vars -> profile["settings"]

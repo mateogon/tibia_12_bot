@@ -10,12 +10,12 @@ GUI_BOOL_KEYS = [
     "loop", "attack", "attack_spells", "hp_heal", "mp_heal",
     "manual_loot", "cavebot", "res", "follow_party", "use_area_rune",
     "manage_equipment", "loot_on_spot", "amp_res", "show_area_rune_target",
-    "use_utito", 'use_haste', 'use_food',
+    "use_utito", 'use_haste', 'use_food',"use_lure_walk",
 ]
 GUI_INT_KEYS = [
     "hp_thresh_high", "hp_thresh_low", "mp_thresh",
     "min_monsters_spell", "min_monsters_rune",
-    "kill_amount", "kill_stop_amount",
+    "kill_amount", "kill_stop_amount","lure_walk_ms", "lure_stop_ms",
 ]
 GUI_STR_KEYS = ["party_leader", "waypoint_folder"]
 
@@ -29,6 +29,9 @@ BASE_SETTINGS = {
     "mp_heal": True,
     "manual_loot": False,
     "cavebot": False,
+    "use_lure_walk": False,
+    "lure_walk_ms": 600,
+    "lure_stop_ms": 400,
     "res": False,
     "amp_res": False,
     "follow_party": False,

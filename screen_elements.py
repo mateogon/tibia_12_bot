@@ -481,7 +481,6 @@ class ScreenWindow(ScreenElement):
             self.region = (region[0]+top_x , region[1] + top_y ,
                            region[0]+top_x + top_width , region[1] + bottom_y + bottom_height )
             self.detected = True
-            print("found {} on screen".format(self.name))
             return True
 
 class RelativeScreenElement(BaseElement):

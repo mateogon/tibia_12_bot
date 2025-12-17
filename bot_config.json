@@ -239,6 +239,69 @@
                 "use_haste": true,
                 "use_food": false
             }
+        },
+        "Master Liqui::knight": {
+            "slots": {
+                "heal_high": 0,
+                "heal_low": 1,
+                "mana": 2,
+                "sio": null,
+                "haste": 10,
+                "food": 12,
+                "utito": 15,
+                "exeta": 9,
+                "amp_res": 15,
+                "magic_shield": null,
+                "cancel_magic_shield": null,
+                "area_rune": 5,
+                "ring": 20,
+                "amulet": 19,
+                "weapon": 17,
+                "shield": 21,
+                "armor": 18,
+                "helmet": 16
+            },
+            "spells": {
+                "area_slots": [
+                    4,
+                    5,
+                    6
+                ],
+                "target_slots": [
+                    8
+                ]
+            },
+            "settings": {
+                "loop": true,
+                "attack": true,
+                "attack_spells": true,
+                "hp_heal": true,
+                "mp_heal": true,
+                "manual_loot": false,
+                "cavebot": true,
+                "res": false,
+                "amp_res": true,
+                "follow_party": false,
+                "use_area_rune": false,
+                "manage_equipment": false,
+                "loot_on_spot": false,
+                "show_area_rune_target": false,
+                "use_utito": false,
+                "use_haste": true,
+                "use_food": false,
+                "hp_thresh_high": 90,
+                "hp_thresh_low": 60,
+                "mp_thresh": 10,
+                "min_monsters_spell": 2,
+                "min_monsters_rune": 1,
+                "kill_amount": 6,
+                "kill_stop_amount": 1,
+                "party_leader": "",
+                "waypoint_folder": "test",
+                "use_lure_walk": true,
+                "lure_walk_ms": 200,
+                "lure_stop_ms": 400
+            }
         }
     }
 }
