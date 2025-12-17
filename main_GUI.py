@@ -119,11 +119,13 @@ class ModernBotGUI:
         combat_tab = tabview.add("Combat")
         navigation_tab = tabview.add("Navigation")
         settings_tab = tabview.add("Settings")
+        dev_tab = tabview.add("Dev Tools")
         
         self._setup_healing_tab(healing_tab)
         self._setup_combat_tab(combat_tab)
         self._setup_navigation_tab(navigation_tab)
         self._setup_settings_tab(settings_tab)
+        self._setup_dev_tab(dev_tab)
 
     def _configure_entry(self, entry_widget):
         """Helper method to configure entry widgets with proper selection behavior"""
@@ -196,7 +198,32 @@ class ModernBotGUI:
         
         mp_pct_label = ctk.CTkLabel(mp_thresh_frame, text="%")
         mp_pct_label.pack(side="left", padx=5)
-        
+
+    def _setup_dev_tab(self, parent):
+        """Setup developer tools and data collection"""
+        data_frame = ctk.CTkFrame(parent)
+        data_frame.pack(fill="x", padx=20, pady=10)
+
+        data_label = ctk.CTkLabel(data_frame, text="Data Collection", font=("Roboto", 14, "bold"))
+        data_label.pack(anchor="w", padx=10, pady=5)
+
+        desc_label = ctk.CTkLabel(
+            data_frame,
+            text="Capture current game screen and monster\ncoordinates for training external tools.",
+            font=("Roboto", 12),
+        )
+        desc_label.pack(anchor="w", padx=10, pady=(0, 10))
+
+        capture_btn = ctk.CTkButton(
+            data_frame,
+            text="SNAPSHOT (Image + Data)",
+            command=self.bot.capture_training_data,
+            height=40,
+            fg_color="#2B823A",
+            hover_color="#1E612A",
+        )
+        capture_btn.pack(fill="x", padx=20, pady=10)
+    
     def _setup_combat_tab(self, parent):
         """Setup combat settings"""
         # Main combat switches

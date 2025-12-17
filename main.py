@@ -2,6 +2,8 @@
 import win32gui,win32api
 from ctypes import windll
 import time
+import json
+import datetime
 import cv2
 import imutils
 import numpy as np
@@ -22,6 +24,7 @@ wsh= comclt.Dispatch("WScript.Shell")
 #LOCAL
 import data
 import image as img
+import detect_monsters as dm
 from screen_elements import *
 from window_interaction import *
 from extras import *
@@ -1170,80 +1173,149 @@ class Bot:
             party_positions.append(((curX,curY), is_leader))  
         self.party_positions = party_positions
     #@timeit
-    def updateMonsterPositions(self,test = False):
-        #self.monster_positions
+    def updateMonsterPositions(self, test=False):
+        """
+        New logic using Black Bar detection from detect_monsters.py
+        """
+        # 1. Capture the standard Game Screen region
+        # We no longer need 'getNamesArea' or downscaling ratios.
+        region = self.s_GameScreen.region
+        image = img.screengrab_array(self.hwnd, region)
         
-        contour_list = self.getMonstersAroundContours(9,False,False)
-        #contour_list2 = self.getMonstersAroundContoursOld(9,False,False)
-        
-        
-        if test:
-            opening = img.screengrab_array(self.hwnd,self.s_GameScreen.region, True)
-        
-        monster_positions = []
-        offset_x = int(self.s_GameScreen.tile_h/4) #offset because names are offset from tile
-        offset_y = 2*offset_x#int(self.s_GameScreen.tile_h/4)#2*offset_x
-        ratio = self.monster_around_scale_ratio
-        for contour in contour_list:
-            cnts = imutils.grab_contours(contour)
-            for cur in cnts:
-                # compute the center of the contour
-                M = cv2.moments(cur)
-                
-                curX = (int(M["m10"] / M["m00"])*ratio)+offset_x
-                curY = (int(M["m01"] / M["m00"])*ratio)+offset_y
-                is_party = False
-                for player in self.party_positions:
-                    cX,cY = player[0]
-                    is_leader = player[1]
-                    dist = sqrt((cX-curX)**2+(cY-curY)**2)
-                    #print(dist)
-                    if dist < 40:
-                        is_party = True
-                        #if test:
-                        #    if is_leader:
-                        #        cv2.circle(opening,(curX,curY), 5, (0,255,0), -1)
-                        #    else:
-                        #        cv2.circle(opening,(curX,curY), 5, (255,0,0), -1)
-                
-                        break
-                if not is_party:
-                    monster_positions.append((curX,curY))
-                    if test:
-                        cv2.circle(opening,(curX,curY), 5, (0,255,0), -1)
-        
-        self.monster_positions = monster_positions
-        if test:
-            img.visualize_fast(opening)
-    #@timeit
-    def updateMonsterPositionsNew(self, test=False):
-        contour_list = self.getMonstersAroundContours(9, False, False)
-        if test:
-            opening = img.screengrab_array(self.hwnd, self.s_GameScreen.region, False)
+        if image is None:
+            self.monster_positions = []
+            return
 
+        # 2. Run the detection
+        # This returns [(x, y), ...] relative to the image
+        raw_positions = dm.detect_monsters(image)
+        
         monster_positions = []
-        offset_x = int(self.s_GameScreen.tile_h / 4)  # Offset because names are offset from tile
-        offset_y = 2 * offset_x
+        
+        # 3. Filter out Party Members
+        # We compare the detected Name center against known Party member positions.
+        for (mx, my) in raw_positions:
+            is_party = False
+            for player in self.party_positions:
+                px, py = player[0] # px, py are relative to the GameScreen
+                is_leader = player[1]
+                
+                # Calculate distance between detected Monster Name and Party Sprite Center
+                # Note: Party detection finds the SPRITE (feet/body). 
+                # Monster detection finds the NAME (head).
+                # There is a vertical distance naturally (~30px). 
+                # We use Euclidean distance < 45 to be safe.
+                dist = sqrt((px - mx)**2 + (py - my)**2)
+                
+                if dist < 45: 
+                    is_party = True
+                    if test:
+                        # Draw blue on party members for debug
+                        cv2.circle(image, (mx, my), 5, (255, 0, 0), -1)
+                    break
+            
+            if not is_party:
+                monster_positions.append((mx, my))
+                if test:
+                    # Draw green on valid monsters
+                    cv2.circle(image, (mx, my), 5, (0, 255, 0), -1)
+
+        self.monster_positions = monster_positions
+        
+        if test:
+            img.visualize_fast(image)
+
+    def get_training_positions(self):
+        """
+        Calculates the center of the detected Name/Health bars relative to the 
+        standard GameScreen region.
+        """
+        # 1. Get contours from the 'Names Area' (which is shifted up)
+        contour_list = self.getMonstersAroundContours(9, False, False)
+        
+        training_positions = []
+        
+        # 2. Get the shift amount used in getNamesArea
+        # We need to subtract this to align with the GameScreen image
+        # In getNamesArea: r = (r[0], r[1]-offset_x, ...
+        # So the detection area starts 'offset_x' pixels ABOVE the game screen.
+        area_shift_y = int(self.s_GameScreen.tile_h / 4) # Matching the value used in your logic
+        
         ratio = self.monster_around_scale_ratio
         
         for contours in contour_list:
             cnts = imutils.grab_contours(contours)
             for cur in cnts:
-                # Calculate moments
-                moments = cv2.moments(cur)
-                # Ensure moments['m00'] is not zero to avoid division by zero
-                if moments['m00'] != 0:
-                    center_x = int(moments['m10'] / moments['m00'])
-                    center_y = int(moments['m01'] / moments['m00'])
-                    curX = (center_x * ratio) + offset_x
-                    curY = (center_y * ratio) + offset_y
-                    monster_positions.append((curX, curY))
-                else:
-                    # If area (m00) is zero, set center to (0, 0) or handle as needed
-                    monster_positions.append((0, 0))  # Optional: handle differently
+                M = cv2.moments(cur)
+                if M["m00"] != 0:
+                    # Raw centroid in the "Names Area" image
+                    cX = int(M["m10"] / M["m00"])
+                    cY = int(M["m01"] / M["m00"])
+                    
+                    # Scale back up (because detection uses downscaled image)
+                    scaled_X = cX * ratio
+                    scaled_Y = cY * ratio
+                    
+                    # 3. Adjust for the Area Shift
+                    # If detection Y is 10, and area started -20 pixels (up), 
+                    # then on the main screen (0), the Y is 10 - 20 = -10.
+                    # However, we also have an offset_x and offset_y in the original code 
+                    # that moved it to the feet. We WANT to stay on the name.
+                    
+                    # Assuming the contour is roughly the center of the nameplate:
+                    # We just map it to the GameScreen coordinate system.
+                    
+                    # Note: You might need to tweak this specific subtraction 
+                    # depending on exactly how getNamesArea is defined in your current version.
+                    # Based on standard logic:
+                    final_X = scaled_X + int(self.s_GameScreen.tile_h / 4) # Re-add the X offset if it aligns the column
+                    final_Y = scaled_Y - area_shift_y 
+                    
+                    training_positions.append((final_X, final_Y))
+                    
+        return training_positions
 
-        return monster_positions
-    
+    def capture_training_data(self):
+        """
+        Saves the current GameScreen image and the currently detected 
+        monster NAME coordinates to a 'training_data' folder.
+        """
+        save_dir = os.path.join(self.base_directory, "training_data")
+        if not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        img_filename = f"{timestamp}.png"
+        json_filename = f"{timestamp}.json"
+        
+        img_path = os.path.join(save_dir, img_filename)
+        json_path = os.path.join(save_dir, json_filename)
+
+        # 1. Capture the Image
+        game_screen_img = img.screengrab_array(self.hwnd, self.s_GameScreen.region)
+        if game_screen_img is None:
+            print("Failed to capture training image.")
+            return
+
+        # 2. Get Name Coordinates (Not Feet!)
+        name_positions = self.get_training_positions()
+
+        # 3. Save Image
+        cv2.imwrite(img_path, game_screen_img)
+
+        # 4. Save Metadata
+        data = {
+            "timestamp": timestamp,
+            "image_file": img_filename,
+            "monster_count": len(name_positions),
+            "coordinates": [ [int(x), int(y)] for x, y in name_positions ]
+        }
+
+        with open(json_path, 'w') as f:
+            json.dump(data, f, indent=4)
+
+        print(f"[DATA] Saved {img_filename} with {len(name_positions)} name labels.")
+        
     def useAreaRune(self,test = False):
         if not test and (self.buffs['pz'] or self.monsterCount() <= 1):
             return
@@ -2107,8 +2179,7 @@ if __name__ == "__main__":
         times[1] = timeInMillis()
         if bot.monsterCount() > 0:
             #print("monster count: "+str(bot.monsterCount()))
-            bot.updateMonsterPositions()
-            #bot.updateMonsterPositionsNew()
+            bot.updateMonsterPositions(test=True)
         times[2] = timeInMillis()
         #bot.getMonstersAround(bot.areaspell_area,False,False)
         #if len(bot.party.keys()) > 0:w

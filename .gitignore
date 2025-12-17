@@ -3,3 +3,5 @@ img/playerNames
 img/wpts
 __pycache__/
 env
+debug_output/
+training_data/
