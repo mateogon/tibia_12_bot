@@ -1,5 +1,5 @@
 # region Imports
-import win32gui,win32api
+import win32gui,win32api,win32con
 from ctypes import windll
 import time
 import json
@@ -7,14 +7,13 @@ import datetime
 import cv2
 import imutils
 import numpy as np
-
+import keyboard as kb
 import PIL
 import os
-import keyboard as kb
 from pynput import keyboard
 from math import sqrt
 # data
-from collections import deque
+from collections import Counter, deque
 #from natsort import natsorted
 import win32com.client as comclt
 from scipy.ndimage import morphology
@@ -129,6 +128,9 @@ class Bot:
         self.action_bar_anchor_pos = None
 
     def _init_queues_and_states(self):
+        self.resize_confirmation_count = 0
+        self.resize_threshold = 5  # Only redetect if border is gone for 5 consecutive frames
+
         self.hppc, self.mppc = 100, 100
         self.hp_queue = deque([100, 100, 100], maxlen=3)
         self.monster_queue = deque([0]*10, maxlen=10)
@@ -153,11 +155,19 @@ class Bot:
         self.kill_start_time = time.time()
         self.kill_stop_time = 120
         self.lure_amount = 2
-        self.mark_list = ["skull", "lock", "cross"]
+        self.visited_fingerprints = []
+        self.discovery_mode = True # True until we finish the first complete lap
+        self.loop_count = 0
+        self.circuit_marks_found = 0
+        self.mark_list = ["skull", "lock", "cross", "star"]
         self.current_mark_index = 0
         self.current_mark = self.mark_list[0]
+        # NEW: Separate index for the manual mark-placer
+        self.add_mark_index = 0 
+        self.add_mark_type = self.mark_list[0]
+        self.last_mark_rel_pos = None # Stores the map-relative (x,y) of the last reached mark
         self.previous_marks = {mark: False for mark in self.mark_list}
-
+        self.visited_history = deque(maxlen=4)
         # Lógica de Lure
         self.lure_stutter_active = False
         self.last_lure_action_time = time.time()
@@ -170,7 +180,16 @@ class Bot:
         self.last_map_center_img = None
         self.kiting_stuck_count = 0
         self.kite_rotation_offset = 0
-    
+        self.kiting_mode = StringVar(value="forward")
+        self.last_reached_mark_rel = None
+        self.collision_grid = None
+        self.map_scale = 2  # Baseline
+        self.last_scale_check = 0
+        # Pick 10 random offsets within a 20px radius of map center for tracking
+        self.stuck_check_coords = [(np.random.randint(-20, 20), np.random.randint(-20, 20)) for _ in range(10)]
+        self.last_stuck_colors = []
+        self.stuck_counter = 0
+        self.best_rune_tile = None
     def _init_timers(self):
         self.normal_delay = getNormalDelay()
         self.delays = DelayManager(default_jitter_ms_fn=getNormalDelay)
@@ -188,8 +207,8 @@ class Bot:
         self.delays.set_default("exeta_res", 3000)
         self.delays.set_default("amp_res", 6000)
         self.delays.set_default("utito", 10000)
-        self.delays.set_default("centering", 800) # Only recenter every 1.5s
-        self.delays.set_default("kiting", 500) # El mago reacciona más rápido (0.8s) que el caballero
+        self.delays.set_default("centering", 250) # Only recenter every 1.5s
+        self.delays.set_default("kiting", 600) # El mago reacciona más rápido (0.8s) que el caballero
 
         # Immediate Triggers
         for timer in ["equip_cycle", "lure_stop", "exeta_res", "amp_res"]:
@@ -269,8 +288,10 @@ class Bot:
     def updateWindowCoordinates(self):
         maximizeWindow(self.hwnd)
         l, t, r, b = win32gui.GetWindowRect(self.hwnd)
+        
+        # 1. Physical Window Resize (Always trigger)
         if (self.left, self.top, self.right, self.bottom) != (l, t, r, b):
-            print("window rect changed")
+            print("Window physical rect changed. Force updating elements.")
             self.left, self.top, self.right, self.bottom = l, t, r, b
             self.height = abs(self.bottom - self.top)
             self.width = abs(self.right - self.left)
@@ -278,8 +299,9 @@ class Bot:
             self.updateAllElements()
             self.getPartyList()
         else:
-            if self.s_GameScreen.has_been_resized():
-                print("Game view has been resized. Updating bound elements...")
+            # 2. Internal Game View Resize (Use our new debounced check)
+            if self.checkGameScreenMoved():
+                print("Game view internal resize confirmed. Updating bound elements...")
                 self.updateBoundElements()
                 
     def getCharacterName(self):
@@ -379,28 +401,34 @@ class Bot:
         return False
     def checkGameScreenMoved(self, color_min=(14,14,14), color_max=(28,28,28)):
         """
-        Checks if the game screen has moved.
-        Ignores pure black (0,0,0) which indicates a background/minimized capture failure.
+        Checks if the game screen has moved with flicker protection.
         """
         # Get bottom-left corner pixel of the current gamescreen region
-        x = self.s_GameScreen.region[0]      # left
-        y = self.s_GameScreen.region[3] -1   # bottom (y2 is exclusive)
+        x = self.s_GameScreen.region[0]
+        y = self.s_GameScreen.region[3] - 1
         
         pixel = img.GetPixelRGBColor(self.hwnd, (x, y))
         
-        # --- FIX: Ignore Black Screen (Background/Minimized) ---
+        # --- FLICKER PROTECTION: Ignore Pure Black ---
+        # If the capture is black, it's a flicker or minimized window. 
+        # We don't want to redetect; we want to wait for a valid frame.
         if pixel == (0, 0, 0):
-            # print("[DEBUG] Screen is black. Skipping resize check.")
             return False 
 
-        # Check if pixel is in the expected color range
+        # Check if pixel is in the expected dark-grey border range
         in_range = all(color_min[i] <= pixel[i] <= color_max[i] for i in range(3))
         
         if not in_range:
-            print(f"[RESIZE] Point ({x}, {y}) LOST border. Got {pixel}")
-            return True # True = Moved/Resized
+            self.resize_confirmation_count += 1
+            if self.resize_confirmation_count >= self.resize_threshold:
+                print(f"[RESIZE] Point ({x}, {y}) LOST border for {self.resize_confirmation_count} frames. Confirmed. Got {pixel}")
+                self.resize_confirmation_count = 0 # Reset for next time
+                return True 
+        else:
+            # If we get even ONE good frame, reset the counter
+            self.resize_confirmation_count = 0
             
-        return False # False = Stable
+        return False
 
     def updateChatStatusButtonRegion(self):
         #region = (self.width-300, self.height-30, self.width-100, self.height)
@@ -551,29 +579,48 @@ class Bot:
         #img.visualize_fast(image)
         #win32api.PostMessage(self.hwnd, win32con.WM_KEYUP, 0x10, 0)
 
+    def get_filtered_monsters(self):
+        """
+        Returns monster positions excluding the player's center tile.
+        Uses the 15x11 grid system for perfectly accurate filtering.
+        """
+        if not self.monster_positions:
+            return []
+
+        tile_w = self.s_GameScreen.tile_w
+        tile_h = self.s_GameScreen.tile_h
+        p_row, p_col = 5, 7  # Shared player grid constants
+
+        filtered = []
+        for mx, my in self.monster_positions:
+            # Map pixel coordinate to grid tile
+            m_col = int(mx // tile_w)
+            m_row = int(my // tile_h)
+
+            # IGNORE if it's the player's tile (5, 7)
+            if m_row == p_row and m_col == p_col:
+                continue
+            
+            filtered.append((mx, my))
+            
+        return filtered
     
-    def getMonstersAround(self,area,test = True , test2 = False):
-        #contours,_ = self.getMonstersAroundContours(area,test, test2)
-        #print(len(contours[0])-1)
-        #return len(contours[0])-1
+    def getMonstersAround(self, area, test=True, test2=False):
         count = 0
         center = self.s_GameScreen.getRelativeCenter()
         tile_h = self.s_GameScreen.tile_h
-        half_tile = tile_h/2
-        radius = int(tile_h*(area*3/5))
-        #print("tile_h "+str(tile_h)+ " radius " +str(radius) + " area "+str(area))
-        #image = img.screengrab_array(self.hwnd, self.s_GameScreen.region)
+        half_tile = tile_h / 2
+        radius = int(tile_h * (area * 3 / 5))
         
-        #cv2.circle(image,center,radius,(255,0,0),2)
+        valid_monsters = self.get_filtered_monsters()
         
-        
-        for monster in self.monster_positions:
-            dist = sqrt((monster[0]-center[0])**2+(monster[1]-center[1])**2)
+        for monster in valid_monsters:
+            dist = sqrt((monster[0] - center[0])**2 + (monster[1] - center[1])**2)
+            # We still keep the 'dist > half_tile' as a secondary safety
             if dist <= radius and dist > half_tile:
                 count += 1
-                #cv2.circle(image,monster,5,(0,0,255),-1)
-        #img.visualize_fast(image)
         return count
+    
     def acceptPartyInvite(self):
 
         shield_color = (184,154,14)
@@ -1287,84 +1334,55 @@ class Bot:
 
         print(f"[DATA] Saved {img_filename} with {len(name_positions)} name labels.")
         
-    def useAreaRunePrev(self, test=False):
-        # 1. Get the SPECIFIC threshold for runes
-        min_monsters = self.min_monsters_for_rune.get()
+    def useAreaRune(self):
+        """Precision Rune placement using a geometric bitmask."""
+        if not self.delays.due("area_rune") or not self.monster_positions:
+            return False
 
-        # 2. Quick Fail Checks
-        if not test:
-            if self.buffs.get('pz', False):
-                return
-            if self.monsterCount() < min_monsters:
-                return
-            if not self.delays.due("area_rune"):
-                return
+        # 2. Build a binary Monster Grid (11x15)
+        m_grid = np.zeros((11, 15), dtype=int)
+        tile_w = self.s_GameScreen.tile_w
+        tile_h = self.s_GameScreen.tile_h
 
-        # 3. Get valid targets
-        region = self.s_GameScreen.region
-        tile = self.s_GameScreen.tile_w
-        tile_radius = 3  # Radius of GFB/Avalanche (approx 3 tiles)
+        for mx, my in self.monster_positions:
+            col = int(mx // tile_w)
+            row = int(my // tile_h)
+            if 0 <= row < 11 and 0 <= col < 15:
+                m_grid[row, col] = 1
+
+        # 3. Slide Mask over the Grid to find the best impact tile
+        best_hits = 0
+        best_tile = None
         
-        valid_positions = [p for p in self.monster_positions if p != (0, 0)]
-        
-        # Optimization: If total tracked positions < requirement, don't bother clustering
-        if len(valid_positions) < min_monsters:
-            return
+        # We iterate over internal tiles to keep the 7x7 mask on-screen
+        for r in range(3, 8): 
+            for c in range(3, 12):
+                # Extract the 7x7 neighborhood
+                neighborhood = m_grid[r-3:r+4, c-3:c+4]
+                # Matrix multiplication count
+                current_hits = np.sum(neighborhood * BotConstants.RUNE_MASK)
+                
+                if current_hits > best_hits:
+                    best_hits = current_hits
+                    best_tile = (r, c)
 
-        # 4. Find Best Cluster (Brute Force Center Search)
-        best_center = None
-        best_neighbors = []
-
-        for center_candidate in valid_positions:
-            curX, curY = center_candidate
+        # 4. Fire if threshold is met
+        if best_tile and best_hits >= self.min_monsters_for_rune.get():
+            tr, tc = best_tile
+            self.best_rune_tile = best_tile # Store for visualization
             
-            # Find all neighbors within rune radius of this candidate
-            neighbors = []
-            for potential in valid_positions:
-                pX, pY = potential
-                dist = sqrt((pX - curX)**2 + (pY - curY)**2)
-                
-                # Check distance (Radius * Tile Size)
-                if dist <= (tile * tile_radius):
-                    neighbors.append((pX, pY))
-            
-            # If this cluster is better than what we found before, keep it
-            if len(neighbors) > len(best_neighbors):
-                best_neighbors = neighbors
-                best_center = center_candidate
-                
-                # Optimization: If we found a huge cluster, stop searching early
-                if len(best_neighbors) >= 5:
-                    break
-        
-        # 5. Execute Attack
-        if best_center is not None:
-            # Check against the GUI setting
-            if len(best_neighbors) >= min_monsters:
-                
-                # Calculate the centroid of the cluster for optimal coverage
-                avg_x = sum([n[0] for n in best_neighbors]) / len(best_neighbors)
-                avg_y = sum([n[1] for n in best_neighbors]) / len(best_neighbors)
-                
-                final_x = int(avg_x)
-                final_y = int(avg_y)
+            gs = self.s_GameScreen.region
+            # Click center of tile + small random jitter
+            target_px_x = int(gs[0] + (tc + 0.5) * tile_w) + np.random.randint(-4, 4)
+            target_px_y = int(gs[1] + (tr + 0.5) * tile_h) + np.random.randint(-4, 4)
 
-                # Visualize (Debug / GUI toggle)
-                self._visualize_area_rune_target(final_x, final_y, neighbors_rel=best_neighbors, radius_px=tile*tile_radius)
-
-                if not test:
-                    # 1. Click Rune Hotkey
-                    if not self.clickActionbarSlot(self.slots.get("area_rune")):
-                        return
-                    
-                    # 2. Click Game Screen (Global Coordinates)
-                    # region[0], region[1] are the top-left of the game screen
-                    click_client(self.hwnd, region[0] + final_x, region[1] + final_y)
-                    
-                    # 3. Set Cooldown
-                    self.delays.trigger("area_rune")
-                    print(f"[COMBAT] Fired Area Rune on {len(best_neighbors)} targets.")
-
+            if self.clickActionbarSlot(self.slots.get("area_rune")):
+                click_client(self.hwnd, target_px_x, target_px_y)
+                self.delays.trigger("area_rune")
+                self.updateLastAttackTime()
+                print(f"[COMBAT] Precision Rune: Hit {best_hits} monsters.")
+                return True
+        return False
 
     def walkAwayFromMonsters(self):
         region = self.s_GameScreen.region
@@ -1689,54 +1707,39 @@ class Bot:
     
     def followLeader(self):
         leader_name = self.party_leader.get()
-
         if leader_name not in self.party:
             return False
 
         try:
-            name_rect = self.party[leader_name]["name_rect"]  # (x1,y1,x2,y2) CLIENT coords
-            x1, y1, x2, y2 = name_rect
-
-            # --- PRE-FLIGHT (leader not away) ---
-            name_img = img.screengrab_array(self.hwnd, name_rect)
-            if name_img is not None:
-                target_color = np.array([192, 192, 192])  # BGR in your pipeline, but 192,192,192 is symmetric
-                if not np.any(np.all(name_img == target_color, axis=2)):
-                    print(f"[DEBUG] Skipping follow: Leader '{leader_name}' is AWAY.")
-                    return False
-
-            # Click center of the name row (CLIENT coords)
-            click_x = (x1 + x2) // 2
-            click_y = (y1 + y2) // 2
-
-            # Context menu "Follow" offset (CLIENT coords)
-            off_x = 35
-            off_y = 35
-            menu_x = click_x + off_x
-            menu_y = click_y + off_y
-
+            # 1. Get coordinates from your OCR/Scan logic
+            name_rect = self.party[leader_name]["name_rect"] # (x1, y1, x2, y2)
             
+            # 2. Calculate center in Client Coords
+            click_x_client = (name_rect[0] + name_rect[2]) // 2
+            click_y_client = (name_rect[1] + name_rect[3]) // 2
 
-            # Execute (CLIENT coords only)
-            _, _, (x_i, y_i) = win32gui.GetCursorInfo()
-            win32api.SetCursorPos((click_x, click_y))
-            time.sleep(0.05) 
-            rclick_client(self.hwnd, click_x, click_y)
-            time.sleep(1)
-            # Debug image: crop around the click point (CLIENT coords)
-            debug_img = img.screengrab_array(self.hwnd, (click_x - 50, click_y - 50, click_x + 150, click_y + 150))
-            if debug_img is not None:
-                debug_img = np.ascontiguousarray(debug_img, dtype=np.uint8)
-                cv2.drawMarker(debug_img, (50, 50), (255, 0, 0), markerType=cv2.MARKER_CROSS, markerSize=15, thickness=2)
-                cv2.drawMarker(debug_img, (50 + off_x, 50 + off_y), (0, 0, 255), markerType=cv2.MARKER_CROSS, markerSize=15, thickness=2)
-                cv2.imwrite("debug_follow_action.png", debug_img)
-            win32api.SetCursorPos((menu_x, menu_y))
-            click_client(self.hwnd, menu_x, menu_y)
-            win32api.SetCursorPos((x_i, y_i))
+            # 3. Convert to Screen Coords (to fix the 'Title Bar' offset)
+            screen_pt = win32gui.ClientToScreen(self.hwnd, (click_x_client, click_y_client))
+            screen_x, screen_y = screen_pt[0], screen_pt[1]
+
+            # 4. Store mouse and move
+            _, _, (orig_x, orig_y) = win32gui.GetCursorInfo()
+            
+            # 5. Right Click using Physical Click
+            physical_click(self.hwnd,screen_x, screen_y, right=True)
+            time.sleep(0.2)
+            
+            # 6. Click the 'Follow' option (Blind offset)
+            # Standard Tibia context menu 'Follow' is usually ~35px right, ~35px down
+            # Note: If this misses, we can use the 37px boundary logic here too
+            physical_click(self.hwnd,screen_x + 35, screen_y + 35, right=False)
+            
+            # 7. Return mouse
+            win32api.SetCursorPos((orig_x, orig_y))
             return True
 
         except Exception as e:
-            print("error in followLeader: " + str(e))
+            print(f"Error in followLeader: {e}")
             return False
 
           
@@ -1849,40 +1852,102 @@ class Bot:
                 self.clickActionbarSlot(self.slots.get("sio"))
 
     def cavebottest(self):
+        # 1. Update basic state for this frame
         marks = self.getClosestMarks()
+        self.monster_count = self.monsterCount() # Ensure this is fresh
         kill_time = time.time() - self.kill_start_time
         
+        # --- 2. STATE MACHINE (Toggle Kill Mode) ---
+        if not self.kill:
+            if self.monster_count >= self.kill_amount.get():
+                print(f"[CAVEBOT] Switching to KITING. Monsters: {self.monster_count}")
+                self.kill = True
+                self.kill_start_time = time.time()
+                self.clickStop()
+        else:
+            if self.monster_count <= self.kill_stop_amount.get() or kill_time > self.kill_stop_time:
+                print(f"[CAVEBOT] Switching to LURING/WALKING.")
+                if self.manual_loot.get() and self.monster_count == 0:
+                    for i in range(0, 2): self.lootAround()
+                self.kill = False
+
+        # --- 3. THE PROGRESSION ENGINE (No Lock) ---
+        # This part runs every frame to see if we reached our waypoint landmark.
+        if marks:
+            dist, abs_pos, rel_pos = marks[0]
+            
+            # Arrival Threshold: 6px for walking, 18px "Soft Arrival" for forward kiting
+            arrival_threshold = 6
+            if self.kill and self.kiting_mode.get().lower() == "forward":
+                arrival_threshold = 18
+
+            if dist <= arrival_threshold:
+                # --- MEMORY & DISCOVERY ---
+                # Update memory so Backward kiting knows where we just were
+                self.last_reached_mark_rel = rel_pos
+                
+                # Check fingerprint to prevent loop-stuck
+                is_seen, score, idx = self.is_visited_detailed(rel_pos)
+                total_nodes = len(self.visited_fingerprints)
+                mem_limit = max(1, int(total_nodes * 0.5))
+
+                if idx != -1 and score > 0.88:
+                    if idx not in self.visited_history:
+                        self.visited_history.append(idx)
+                        while len(self.visited_history) > mem_limit:
+                            self.visited_history.popleft()
+                elif self.discovery_mode:
+                    # Save new landmark during the first lap
+                    fp = self.get_mark_fingerprint(rel_pos)
+                    new_idx = len(self.visited_fingerprints)
+                    self.visited_fingerprints.append({"pixels": fp, "type": self.current_mark})
+                    self.visited_history.append(new_idx)
+                    print(f"[MEMORY] Saved new node {new_idx} for {self.current_mark}")
+
+                # --- ADVANCE TO NEXT MARK ---
+                print(f"[CAVEBOT] Node {self.current_mark} reached ({int(dist)}px). Advancing.")
+                self.clickStop()
+                self.nextMark()
+                
+                # REFRESH: Get the NEW mark data immediately so kiting/walking 
+                # uses the new destination in this same frame.
+                marks = self.getClosestMarks()
+
+        # --- 4. NAVIGATION RESET (Fallback if no marks visible) ---
+        if not marks:
+            if self.current_mark == self.mark_list[-1]: 
+                self.loop_count += 1
+                self.discovery_mode = False
+                print(f"[CAVEBOT] Loop #{self.loop_count} Reset.")
+                self.current_mark_index = 0
+                self.current_mark = self.mark_list[0]
+                marks = self.getClosestMarks() 
+                if not marks: return 
+            else:
+                self.nextMark()
+                return
+
+        # --- 5. EXECUTION (Final Movement Step) ---
+        # Unpack the (potentially refreshed) mark data
+        dist, abs_pos, rel_pos = marks[0]
+
         if self.kill:
+            # ACTIVE COMBAT MOVEMENT
             if self.monster_count >= 1:
                 if self.use_recenter.get():
                     self.recenter_on_pack()
                 elif self.use_kiting.get():
-                    # Pass the first mark position if it exists
-                    target_mark = marks[0][1] if marks else None
-                    self.kite_from_pack(target_mark_pos=target_mark)
-            # ----------------------------
+                    # Will kite toward rel_pos (either the current mark or the new one if we just advanced)
+                    self.kite_from_pack(next_mark_rel=rel_pos)
+            return # Block passive navigation while kiting
 
-            if self.monster_count <= self.kill_stop_amount.get() or kill_time > self.kill_stop_time:
-                if self.manual_loot.get():
-                    for i in range(0,2): self.lootAround()
-                self.kill = False
-        else:
-            # MODO CAMINAR / LURE
-            if self.monster_count >= self.kill_amount.get():
-                self.kill = True
-                self.kill_start_time = time.time()
-                self.clickStop() # Parar inmediatamente al empezar a matar
-            
-            if len(marks) == 0:
-                self.nextMark()
-            else:
-                dist, pos, _ = marks[0]
-                if dist <= 3:
-                    self.updatePreviousMarks()
-                    self.nextMark()
-                else:
-                    self.executeLureWalk(pos)
-
+        # PASSIVE NAVIGATION MOVEMENT (Luring/Walking)
+        if self.use_lure_walk.get() and self.monster_count > 0:
+            self.executeLureWalk(abs_pos)
+        elif self.delays.allow("walk", base_ms=250):
+            click_client(self.hwnd, abs_pos[0], abs_pos[1])
+    
+    
     def executeLureWalk(self, mark_pos):
         # If the setting is off or no monsters, walk normally
         if not self.use_lure_walk.get() or self.monster_count == 0:
@@ -1921,7 +1986,7 @@ class Bot:
                 click_client(self.hwnd, mark_pos[0], mark_pos[1])
 
     def recenter_on_pack(self):
-        """Project centroid to the best available 8-directional tile."""
+        """Aggressive recentering to maximize AoE spell coverage."""
         if not self.delays.due("centering") or not self.monster_positions:
             return
 
@@ -1936,109 +2001,193 @@ class Bot:
         dy = avg_my - p_center[1]
         dist = sqrt(dx**2 + dy**2)
 
-        # Only move if they are at least 1.5 tiles away (prevents 'dancing' in place)
-        if dist < (tile_size * 1.5) or dist > (tile_size * 6):
+        # --- AGGRESSION TWEAKS ---
+        # Lowered minimum distance from 1.5 tiles to 0.6 tiles.
+        # If the pack center is even slightly off, we step toward it.
+        if dist < (tile_size * 0.6) or dist > (tile_size * 7):
             return
 
-        # 2. Determine Discrete Direction (-1, 0, or 1)
-        # We use a threshold (0.4) to decide if we should move in that axis
+        # 2. Determine Discrete Direction
+        # Lowered threshold from 0.4 to 0.2 to make it much more sensitive to diagonal packs
         dir_x = 0
-        if dx > (tile_size * 0.4): dir_x = 1
-        elif dx < -(tile_size * 0.4): dir_x = -1
+        if dx > (tile_size * 0.2): dir_x = 1
+        elif dx < -(tile_size * 0.2): dir_x = -1
 
         dir_y = 0
-        if dy > (tile_size * 0.4): dir_y = 1
-        elif dy < -(tile_size * 0.4): dir_y = -1
+        if dy > (tile_size * 0.2): dir_y = 1
+        elif dy < -(tile_size * 0.2): dir_y = -1
 
         # 3. Target Tile Coordinates
         target_rel_x = p_center[0] + (dir_x * tile_size)
         target_rel_y = p_center[1] + (dir_y * tile_size)
 
-        # 4. Obstacle Check: Is there a monster on this tile?
+        # 4. Obstacle Check (Stay strict here to avoid walking INTO a monster)
         for mx, my in self.monster_positions:
             m_dist = sqrt((mx - target_rel_x)**2 + (my - target_rel_y)**2)
-            if m_dist < (tile_size * 0.5):
-                # print("[CAVEBOT] Target tile blocked by monster. Aborting step.")
+            if m_dist < (tile_size * 0.4):
                 return
 
-        # 5. Execute Discrete Step
+        # 5. Execute Step using the new Physical Click logic for reliability
         gs_region = self.s_GameScreen.region
-        abs_x = int(gs_region[0] + target_rel_x)
-        abs_y = int(gs_region[1] + target_rel_y)
-
-        click_client(self.hwnd, abs_x, abs_y)
+        abs_cx = int(gs_region[0] + target_rel_x)
+        abs_cy = int(gs_region[1] + target_rel_y)
+        # Use physical_click to ensure the movement is registered during high-action combat
+        click_client(self.hwnd, abs_cx, abs_cy)
         
-        # Resume attack
-        self.GUI.root.after(50, lambda: self.clickAttack(force=True))
+        # Immediate Attack Resume
+        self.GUI.root.after(30, lambda: self.clickAttack(force=True))
         self.delays.trigger("centering")
 
-    def check_if_moving(self):
-        """Returns True if the character actually changed coordinates on the map."""
-        current_map = self.getCenterMarkImage() # 10x10 crop of map center
-        if self.last_map_center_img is None:
-            self.last_map_center_img = current_map
-            return True
+    def is_actually_moving(self, map_img):
+        """
+        Ultra-fast movement check using sparse pixel sampling.
+        """
+        mw, mh = map_img.shape[1], map_img.shape[0]
+        cx, cy = mw // 2, mh // 2
         
-        # Compare images (simple pixel difference)
-        diff = cv2.absdiff(self.last_map_center_img, current_map)
-        if np.mean(diff) < 1.0: # Threshold for 'identical' images
-            return False # We are stationary
-            
-        self.last_map_center_img = current_map
-        return True
+        current_colors = []
+        for dx, dy in self.stuck_check_coords:
+            current_colors.append(tuple(map_img[cy + dy, cx + dx]))
+        
+        if not self.last_stuck_colors:
+            self.last_stuck_colors = current_colors
+            return True
+
+        # Check if all sampled pixels are identical to last check
+        if current_colors == self.last_stuck_colors:
+            self.stuck_counter += 1
+        else:
+            self.stuck_counter = 0
+            self.last_stuck_colors = current_colors
+
+        # If we haven't changed a single pixel in 5 checks (~500ms), we are stuck
+        return self.stuck_counter < 5
     
-    def kite_from_pack(self, target_mark_pos=None):
+    def kite_from_pack(self, next_mark_rel=None):
+        # 1. Traversal Governor: If we just clicked recently, don't interrupt
         if not self.delays.due("kiting") or not self.monster_positions:
             return
 
+        if self.collision_grid is None:
+            return
+
+        # 2. Movement Check (Stuck detection)
+        map_img = img.screengrab_array(self.hwnd, self.s_Map.region)
+        stuck_boost = 0
+        if map_img is not None and not self.is_actually_moving(map_img):
+            stuck_boost = 250 # Increased panic for being stuck
+        else:
+            # If we are already moving smoothly, we can actually afford to wait longer
+            # to let the animation finish.
+            self.stuck_counter = 0
+
         p_center = self.s_GameScreen.getRelativeCenter()
         tile_size = self.s_GameScreen.tile_h
-        
-        # 1. Check for Stuck state from previous attempt
-        if not self.check_if_moving():
-            self.kiting_stuck_count += 1
-            self.kite_rotation_offset += 45 # Rotate escape angle if stuck
-        else:
-            self.kiting_stuck_count = 0
-            self.kite_rotation_offset = 0
+        p_row, p_col = 5, 7 
 
-        # 2. Calculate Flee Vector
+        # 3. Mode Configuration & Weights
+        mode = self.kiting_mode.get().lower() 
+        attract_vec = (0, 0)
+        
+        # Slightly softer weights to prevent erratic "twitching"
+        w_monster_repulsion = 1.1 
+        w_mark_attraction = 90.0  
+        w_wall_penalty = 120.0   
+        w_center_bonus = 25.0    
+
+        if mode == "forward" and next_mark_rel:
+            m_dx = next_mark_rel[0] - (self.s_Map.center[0] - self.s_Map.region[0])
+            m_dy = next_mark_rel[1] - (self.s_Map.center[1] - self.s_Map.region[1])
+            mag = sqrt(m_dx**2 + m_dy**2) + 0.01
+            attract_vec = (m_dx/mag, m_dy/mag)
+            
+        elif mode == "backward" and hasattr(self, 'last_reached_mark_rel') and self.last_reached_mark_rel:
+            m_dx = self.last_reached_mark_rel[0] - (self.s_Map.center[0] - self.s_Map.region[0])
+            m_dy = self.last_reached_mark_rel[1] - (self.s_Map.center[1] - self.s_Map.region[1])
+            mag = sqrt(m_dx**2 + m_dy**2) + 0.01
+            attract_vec = (m_dx/mag, m_dy/mag)
+            w_monster_repulsion = 4.0
+            w_mark_attraction = 20.0
+
         avg_mx = sum([m[0] for m in self.monster_positions]) / len(self.monster_positions)
         avg_my = sum([m[1] for m in self.monster_positions]) / len(self.monster_positions)
-        
-        flee_dx = p_center[0] - avg_mx
-        flee_dy = p_center[1] - avg_my
-        
-        # 3. Path Prioritization
-        # If we have a mark, slightly pull the flee vector toward the mark direction
-        if target_mark_pos:
-            m_dx = target_mark_pos[0] - self.s_Map.center[0]
-            m_dy = target_mark_pos[1] - self.s_Map.center[1]
-            # Blend flee vector (70%) with path vector (30%)
-            flee_dx = (flee_dx * 0.7) + (m_dx * 0.3)
-            flee_dy = (flee_dy * 0.7) + (m_dy * 0.3)
 
-        # 4. Apply Rotation Offset (if we were stuck)
-        if self.kite_rotation_offset != 0:
-            rad = np.deg2rad(self.kite_rotation_offset)
-            nx = flee_dx * np.cos(rad) - flee_dy * np.sin(rad)
-            ny = flee_dx * np.sin(rad) + flee_dy * np.cos(rad)
-            flee_dx, flee_dy = nx, ny
+        # 4. Scoring Engine
+        directions = [(-1,0), (1,0), (0,-1), (0,1), (-1,-1), (-1,1), (1,-1), (1,1)]
+        best_score = -999999
+        best_move = (0, 0, 1)
 
-        # 5. Convert to Tile Step (-1, 0, 1)
-        dir_x = 1 if flee_dx > 10 else (-1 if flee_dx < -10 else 0)
-        dir_y = 1 if flee_dy > 10 else (-1 if flee_dy < -10 else 0)
+        for dy, dx in directions:
+            tr, tc = p_row + dy, p_col + dx
+            if self.collision_grid[tr, tc] == 1: continue 
+            
+            if dx != 0 and dy != 0:
+                if self.collision_grid[p_row + dy, p_col] == 1 or self.collision_grid[p_row, p_col + dx] == 1:
+                    continue
 
-        # 6. Execute Step
-        target_rel_x = p_center[0] + (dir_x * tile_size)
-        target_rel_y = p_center[1] + (dir_y * tile_size)
-        
-        gs_region = self.s_GameScreen.region
-        click_client(self.hwnd, int(gs_region[0] + target_rel_x), int(gs_region[1] + target_rel_y))
-        
-        self.GUI.root.after(50, lambda: self.clickAttack(force=True))
-        self.delays.trigger("kiting")
-        
+            # DYNAMIC PROBING (1-3 tiles)
+            max_probe = 1
+            for d in [2, 3]:
+                pr, pc = p_row + (dy * d), p_col + (dx * d)
+                if 0 <= pr < 11 and 0 <= pc < 15:
+                    if self.collision_grid[pr, pc] == 0:
+                        max_probe = d
+                    else:
+                        break
+            
+            # Use a slightly more conservative probe to avoid "over-running"
+            actual_probe = np.random.choice(range(1, max_probe + 1))
+
+            tx_px = p_center[0] + (dx * tile_size)
+            ty_px = p_center[1] + (dy * tile_size)
+            score = 0
+
+            # --- SCORE CALCULATION ---
+            dist_to_pack = sqrt((tx_px - avg_mx)**2 + (ty_px - avg_my)**2)
+            score += dist_to_pack * w_monster_repulsion
+
+            if stuck_boost > 0:
+                score += np.random.randint(0, stuck_boost)
+            elif mode != "random":
+                move_dot_attract = (dx * attract_vec[0]) + (dy * attract_vec[1])
+                score += move_dot_attract * w_mark_attraction
+
+            # Multi-scale wall avoidance
+            wall_count_near = np.sum(self.collision_grid[tr-1:tr+2, tc-1:tc+2])
+            wall_count_far = np.sum(self.collision_grid[max(0, tr-2):tr+3, max(0, tc-2):tc+3])
+            score -= (wall_count_near * w_wall_penalty)
+            score -= (wall_count_far * 15)
+            if wall_count_near == 0: score += w_center_bonus
+
+            # Strict melee penalty
+            melee_dist = 0.9 if mode == "forward" else 1.2
+            for mx, my in self.monster_positions:
+                m_dist = sqrt((mx - tx_px)**2 + (my - ty_px)**2)
+                if m_dist < (tile_size * melee_dist):
+                    score -= 2000 
+
+            if score > best_score:
+                best_score = score
+                best_move = (dx, dy, actual_probe)
+
+        # 5. EXECUTION WITH VARIABLE DELAY
+        if best_move != (0, 0, 0):
+            dx, dy, d_dist = best_move
+            gs = self.s_GameScreen.region
+            
+            target_x = int(gs[0] + p_center[0] + (dx * tile_size * d_dist) + np.random.randint(-4, 4))
+            target_y = int(gs[1] + p_center[1] + (dy * tile_size * d_dist) + np.random.randint(-4, 4))
+            
+            click_client(self.hwnd, target_x, target_y)
+            
+            # --- THE DYNAMIC GOVERNOR ---
+            # If we clicked 3 tiles away, we need to wait longer for the character to get there.
+            # Base delay (450ms) + 150ms per extra tile.
+            dynamic_delay = 600 + (d_dist - 1) * 150
+            self.delays.trigger("kiting", base_ms=dynamic_delay)
+            
+            self.GUI.root.after(30, lambda: self.clickAttack(force=True))
+
     def reset_marks_history(self):
         """Manually clears the 'visited' status of map marks."""
         print("[CAVEBOT] Resetting mark history. All marks are now fresh.")
@@ -2047,142 +2196,140 @@ class Bot:
         # Optional: Reset index to start from the beginning of the list
         self.current_mark_index = 0
         self.current_mark = self.mark_list[0]
-
-    def cavebot_distance(self):
-        marks = self.getClosestMarks()
-        monster_count = self.monsterCount()
-        monsters_inside_area = self.getMonstersAround(6)
-        walk_delay = 200
-        walk = False
-        if monsters_inside_area >= 1:
-            self.stopAttacking()
-            self.attack.set(value = False)
-            walk = True
-        else:
-            time_passed = self.delays.elapsed_ms("walk")
-            if time_passed > 100 and time_passed < 500 and monster_count >= 2:
-                self.clickStop()
-                if not self.attack.get():
-                    self.attack.set(value = True)
-                
-        if len(marks) == 0:
-            #print("no "+self.current_mark+ " mark found, changing to the next one")
-            self.nextMark()
-            marks = self.getClosestMarks()
-        print("marks: "+str(marks))
-        index = 0
-        dist, pos, _ = marks[index]
-        print("distance to mark: "+str(dist))
-        #print(dist)
-        if dist <= 3:
-            print("reached current mark")
-            self.updatePreviousMarks()
-            self.nextMark()
-        else:
-            if walk and self.delays.allow("walk", base_ms=walk_delay):
-                print("walking")
-            #print(str(walk_delay))
-            #print("clicking mark")
-                click_client(self.hwnd,pos[0],pos[1])
-                
+           
     def clickStop(self):
         region = self.s_Stop.getCenter()
-        click_client(self.hwnd,region[0],region[1])                     
+        click_client(self.hwnd,region[0],region[1])
+
     def getCenterMarkImage(self):
         map_center = self.s_Map.center
         region = (map_center[0]-5, map_center[1]-5, map_center[0]+5, map_center[1]+5)
         image = img.screengrab_array(self.hwnd,region)
         return image
+    
     def updatePreviousMarks(self):
         self.previous_marks[self.current_mark] = self.getCenterMarkImage()
+    
     def nextMark(self):
-        if self.current_mark_index >= len(self.mark_list)-1:
+        self.current_mark_index += 1
+        if self.current_mark_index >= len(self.mark_list):
             self.current_mark_index = 0
-        else:
-            self.current_mark_index+=1
-        self.current_mark = self.mark_list[self.current_mark_index]
-    
-    
-    def getClosestMarks(self):
-        compare_to_previous = True
-        map_center = self.s_Map.center
-        map_region = self.s_Map.region
-        map_relative_center = (map_center[0]-map_region[0], map_center[1]-map_region[1])
-        result = []
-        discarded = []
-        
-        map_image = img.screengrab_array(self.hwnd, map_region)
-        
-        if map_image is not None:
-            map_image_np = np.array(map_image)
-        else:
-            map_image_np = np.zeros((300, 300, 3), dtype=np.uint8)
-        
-        positions = img.locateManyImage(self.hwnd, "map_marks/"+self.current_mark+".png", map_region, 0.97)
-        
-        if not isinstance(self.previous_marks[self.current_mark], bool):
-            previous = img.locateImage(self.hwnd, self.previous_marks[self.current_mark], map_region, 0.99)
-        else:
-            previous = False
-        
-        if positions:
-            if len(positions) > 0:
-                for pos in positions:
-                    w = int(pos[2])
-                    h = int(pos[3])
-                    
-                    # --- 1. VISUALIZATION / DISTANCE POINT (True Center) ---
-                    # We use this for Distance calculation and Visualization lines.
-                    vis_x = int(pos[0] + (w / 2))
-                    vis_y = int(pos[1] + (h / 2))
-                    
-                    # --- 2. CLICK POINT (Action Anchor) ---
-                    # FIX: Changed from (w + 3, h - 1) to Center to match visualization
-                    # Old: click_x = int(pos[0] + w + 3)
-                    # Old: click_y = int(pos[1] + h - 1)
-                    
-                    click_x = int(pos[0] + (w / 2))
-                    click_y = int(pos[1] + (h / 2))
-                    
-                    # Absolute coords for clicking
-                    click_abs = (map_region[0] + click_x, map_region[1] + click_y)
-                    # Relative coords for drawing
-                    vis_rel = (vis_x, vis_y)
-                    
-                    # FIX: Calculate DISTANCE to the VISUAL CENTER (vis_x, vis_y)
-                    # NOT the click point. This ensures distance goes to ~0 when standing on it.
-                    if self.compareMarkToPrevious((click_x, click_y), previous):
-                        dist = distance.euclidean(map_relative_center, (vis_x, vis_y))
-                        result.append((dist, click_abs, vis_rel))
-                    else:
-                        dist = distance.euclidean(map_relative_center, (vis_x, vis_y))
-                        discarded.append((dist, click_abs, vis_rel))
-        
-        if len(result) == 0:
-            result = discarded
-        result.sort(reverse=False)
-        
-        try:
-            if not isinstance(previous, bool):
-                prev_x, prev_y, w, h = previous
-                prev_center = (int(prev_x + w/2), int(prev_y + h/2))
-                cv2.line(map_image_np, map_relative_center, prev_center, (0, 0, 255), 1) 
             
-            for i, (_, _, vis_point) in enumerate(result):
-                if i == 0:
-                    cv2.line(map_image_np, map_relative_center, vis_point, (0, 255, 0), 2) 
-                else:
-                    cv2.line(map_image_np, map_relative_center, vis_point, (255, 0, 0), 1) 
-        except Exception as e:
-            print(f"Error drawing lines: {e}")
-
-        try:
-            self.current_map_image = map_image_np.copy()
-        except Exception as e:
-            print(f"Error copying map image: {e}")
-            self.current_map_image = np.zeros((300, 300, 3), dtype=np.uint8)
+        self.current_mark = self.mark_list[self.current_mark_index]
+        print(f"[CAVEBOT] Next target mark: {self.current_mark}")
         
+        # Debounce to prevent skipping multiple marks in one frame
+        self.delays.trigger("walk", base_ms=500)
+    
+    def nextAddMark(self):
+        """Advances the sequence for the manual painting tool only."""
+        self.add_mark_index += 1
+        if self.add_mark_index >= len(self.mark_list):
+            self.add_mark_index = 0
+        self.add_mark_type = self.mark_list[self.add_mark_index]
+        print(f"[PAINTER] Ready for next mark: {self.add_mark_type}")
+        
+    def get_mark_fingerprint(self, rel_pos):
+        """Captures a 20x20 visual patch around a mark's relative coordinates."""
+        rx, ry = rel_pos
+        map_reg = self.s_Map.region
+        # Absolute region for the fingerprint
+        fp_reg = (map_reg[0] + rx - 10, map_reg[1] + ry - 10, 
+                  map_reg[0] + rx + 10, map_reg[1] + ry + 10)
+        return img.screengrab_array(self.hwnd, fp_reg)
+
+    def getClosestMarks(self):
+        scale = 3 
+        map_region = self.s_Map.region
+        mw, mh = map_region[2] - map_region[0], map_region[3] - map_region[1]
+        map_rel_center = (self.s_Map.center[0] - map_region[0], self.s_Map.center[1] - map_region[1])
+        
+        map_img = img.screengrab_array(self.hwnd, map_region)
+        if map_img is None: return []
+        map_hd = cv2.resize(map_img, (mw * scale, mh * scale), interpolation=cv2.INTER_CUBIC)
+        
+        positions = img.locateManyImage(self.hwnd, f"map_marks/{self.current_mark}.png", map_region, 0.90)
+        
+        result = []
+        if positions:
+            for pos in positions:
+                rel_x, rel_y = int(pos[0] + pos[2]/2), int(pos[1] + pos[3]/2)
+                vis_lap, score, seq_idx = self.is_visited_detailed((rel_x, rel_y))
+                
+                hd_x, hd_y = rel_x * scale, rel_y * scale
+                box_rad = 3 * scale 
+
+                # Color logic for the GUI
+                if vis_lap:
+                    color, thick = (0, 0, 200), 1 # Red (Already Walked)
+                else:
+                    color, thick = (0, 255, 0), 2 # Green (Valid Target)
+
+                # Draw to GUI buffer
+                cv2.rectangle(map_hd, (hd_x - box_rad, hd_y - box_rad), (hd_x + box_rad, hd_y + box_rad), color, thick)
+                cv2.putText(map_hd, f"{int(score*100)}%", (hd_x + 5, hd_y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255,255,255), 1)
+
+                # ONLY add to navigation result if NOT visited this lap
+                if not vis_lap:
+                    dist = distance.euclidean(map_rel_center, (rel_x, rel_y))
+                    result.append((dist, (map_region[0] + rel_x, map_region[1] + rel_y), (rel_x, rel_y)))
+
+        result.sort(key=lambda x: x[0])
+        self.current_map_image = map_hd
         return result
+
+    def is_visited_detailed(self, rel_pos):
+        """Returns (bool: visited_this_lap, float: highest_score, int: sequence_index)"""
+        map_region = self.s_Map.region
+        mw, mh = map_region[2] - map_region[0], map_region[3] - map_region[1]
+        rx, ry = rel_pos
+        rad = 10  # This defines our 20x20 search area (radius 10)
+        
+        # 1. Determine the actual screen coordinates to capture (clamped to minimap)
+        fp_x1, fp_y1 = max(0, rx - rad), max(0, ry - rad)
+        fp_x2, fp_y2 = min(mw, rx + rad), min(mh, ry + rad)
+        
+        # 2. Calculate the 'Local Trim' within the 20x20 saved patch
+        # This aligns the saved pixels with the current screen capture
+        t_x1 = fp_x1 - (rx - rad)
+        t_y1 = fp_y1 - (ry - rad)
+        t_x2 = t_x1 + (fp_x2 - fp_x1)
+        t_y2 = t_y1 + (fp_y2 - fp_y1)
+        
+        current_fp = img.screengrab_array(self.hwnd, (map_region[0] + fp_x1, map_region[1] + fp_y1, 
+                                                     map_region[0] + fp_x2, map_region[1] + fp_y2))
+        
+        if current_fp is None or not self.visited_fingerprints: 
+            return False, 0.0, -1
+
+        highest_score = 0.0
+        best_index = -1
+        visited_this_lap = False
+
+        for idx, data in enumerate(self.visited_fingerprints):
+            saved_pixels = data["pixels"]
+            
+            # Crop the saved 20x20 fingerprint to match the currently visible window
+            comparable_saved = saved_pixels[t_y1:t_y2, t_x1:t_x2]
+            
+            if current_fp.shape != comparable_saved.shape:
+                continue
+                
+            res = cv2.matchTemplate(current_fp, comparable_saved, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(res)
+            
+            if max_val > highest_score:
+                highest_score = max_val
+                best_index = idx
+                visited_this_lap = data.get("visited_this_lap", False)
+            
+            if max_val > 0.96: break # Exit early on near-perfect match
+                
+        # threshold for logical 'visited' state
+        is_visited_recently = (highest_score > 0.88) and (best_index in self.visited_history)
+        
+        return is_visited_recently, highest_score, best_index
+    
     def compareMarkToPrevious(self,pos,previous):
         #for prev in previous:
         
@@ -2200,41 +2347,92 @@ class Bot:
                 return True
         else:
             return True
-            
-    def saveWaypoint(self, folder):
-        directory = os.getcwd() + "\\img\\wpts\\" + folder
-        dirExists = os.path.exists(directory)
-        filename = "1"
-        map_region = self.s_Map.region
-        map_width, map_height = self.s_Map.getWidth(), self.s_Map.getHeight()
-        waypoint_radius = 35
-        map_waypoint = (map_region[0]+int(map_width/2)-waypoint_radius, map_region[1]+int(map_height/2)-waypoint_radius,
-                map_region[0]+int(map_width/2)+waypoint_radius, map_region[1]+int(map_height/2)+waypoint_radius)
-        image = img.screengrab_array(self.hwnd,map_waypoint)
-        if not dirExists:
-            os.makedirs(directory)
-            os.chdir(directory)
-            cv2.imwrite(filename+".png", image)
-        else:
-            os.chdir(directory)
-            max = 1
-            for file in os.listdir(directory):
-                fname = os.fsdecode(file)
-                if fname.endswith(".png"):
-                    fname = fname.replace(".png", "")
-                    fname = int(fname)
-                    if (fname > max):
-                        max = fname
-            print(len(os.listdir(directory)))
-            print(os.listdir(directory))
-            if (len(os.listdir(directory)) > 0):
-                max += 1
-            print(str(max)+".png")
 
-            if not cv2.imwrite(str(max)+".png", image):
-                raise Exception("Could not write image")
-    def addWaypoint(self):
-        self.saveWaypoint(self.waypoint_folder.get())
+
+
+    def _place_mark_at_screen_coords(self, client_x, client_y):
+        """
+        Now uses Client Coordinates because physical_click handles the Screen translation.
+        """
+        # 1. Store original screen mouse position
+        _, _, (orig_x, orig_y) = win32gui.GetCursorInfo()
+        
+        try:
+            map_reg = self.s_Map.region
+            # rel_x helps determine if menu opens left or right
+            rel_x = client_x - map_reg[0]
+            
+            # 2. Open Context Menu
+            physical_click(self.hwnd,client_x, client_y, right=True)
+            time.sleep(0.08) 
+
+            # 3. Calculate Menu Option Position (Client-relative)
+            if rel_x < 37:
+                menu_x, menu_y = client_x + 45, client_y + 10
+            else:
+                menu_x, menu_y = client_x - 45, client_y + 10
+
+            # 4. Click 'Create Mark'
+            physical_click(self.hwnd,menu_x, menu_y, right=False)
+            time.sleep(0.1)
+            
+            # 5. Wait for the 'Edit Mark' dialog and force a frame refresh
+            print(f"[PAINTER] Waiting for dialog to search for {self.add_mark_type}...")
+            
+            icon_pos = None
+            search_reg = (self.width//4, self.height//4, 3*self.width//4, 3*self.height//4)
+            icon_path = f"map_marks/{self.add_mark_type}.png"
+
+            # Retry Loop: This is crucial because BackgroundFrameGrabber 
+            # might need a few cycles to catch the new window.
+            for attempt in range(6):
+                time.sleep(0.05)
+                self.updateFrame() # FORCE the grabber to pull a new frame from the GPU
+                
+                icon_pos = img.locateImage(self.hwnd, icon_path, search_reg, 0.90)
+                if icon_pos:
+                    break
+            
+            if icon_pos:
+                ix, iy, iw, ih = icon_pos
+                target_ix = search_reg[0] + ix + (iw//2)
+                target_iy = search_reg[1] + iy + (ih//2)
+                
+                # 6. Click Icon and Save
+                physical_click(self.hwnd,target_ix, target_iy, right=False)
+                time.sleep(0.05)
+                win32api.keybd_event(win32con.VK_RETURN, 0, 0, 0)
+                time.sleep(0.05)
+                win32api.keybd_event(win32con.VK_RETURN, 0, win32con.KEYEVENTF_KEYUP, 0)
+                
+                print(f"[PAINTER] Success: Placed {self.add_mark_type}.")
+                self.nextAddMark()
+            else:
+                win32api.keybd_event(win32con.VK_ESCAPE, 0, 0, 0)
+                time.sleep(0.05)
+                win32api.keybd_event(win32con.VK_ESCAPE, 0, win32con.KEYEVENTF_KEYUP, 0)
+                print(f"[PAINTER] Could not find {self.add_mark_type} icon in the capture buffer.")
+
+        finally:
+            # 7. Snap mouse back
+            win32api.SetCursorPos((orig_x, orig_y))
+
+    def mark_at_mouse(self):
+        if not self.delays.allow("manual_mark", base_ms=1200): return
+        _, _, (sx, sy) = win32gui.GetCursorInfo()
+        
+        # Convert Screen -> Client so it plays nice with our new physical_click
+        point = win32gui.ScreenToClient(self.hwnd, (sx, sy))
+        self._place_mark_at_screen_coords(point[0], point[1])
+
+    def mark_at_player(self):
+        if not self.delays.allow("manual_mark", base_ms=1200): return
+        # Minimap center is already in Client coords
+        map_reg = self.s_Map.region
+        cx = (map_reg[0] + map_reg[2]) // 2
+        cy = (map_reg[1] + map_reg[3]) // 2
+        self._place_mark_at_screen_coords(cx, cy)
+
     def turn(self):
         setForegroundWindow(self.hwnd)
         wsh.SendKeys("^a") 
@@ -2304,6 +2502,52 @@ class Bot:
         else:
             return False
 
+    def sell_item_at_mouse(self):
+        """
+        Contextual macro: Clicks an item and confirms the trade via the 'OK' button.
+        """
+        client_origin = win32gui.ClientToScreen(self.hwnd, (0, 0))
+        # 1. Store original position and click the item
+        _, _, (orig_x, orig_y) = win32gui.GetCursorInfo()
+        
+        # We use a slight delay between actions for client stability
+        physical_click(self.hwnd, orig_x - client_origin[0], orig_y - client_origin[1], right=False)
+        time.sleep(0.1)
+
+        # 2. Define search region for the 'OK' button
+        # The button is usually 100-300 pixels below the item list
+        # Search Box: [MouseX - 100, MouseY, MouseX + 200, MouseY + 400]
+        # We convert screen coords to client coords for the search function
+        
+        client_pt = win32gui.ScreenToClient(self.hwnd, (orig_x, orig_y))
+        print(f"client_pt: {client_pt}, client_origin: {client_origin}")
+        search_region = (
+            max(0, client_pt[0] - 150), 
+            client_pt[1], 
+            min(self.width, client_pt[0] + 150), 
+            min(self.height, client_pt[1] + 450)
+        )
+
+        # 3. Locate the 'OK' Button
+        # We call updateFrame to ensure we see the result of our first click
+        self.updateFrame()
+        ok_btn = img.locateImage(self.hwnd, 'hud/npc_trade_ok.png', search_region, 0.90)
+
+        if ok_btn:
+            ix, iy, iw, ih = ok_btn
+            # Calculate absolute click target
+            target_x = search_region[0] + ix + (iw // 2)
+            target_y = search_region[1] + iy + (ih // 2)
+
+            # 4. Click 'OK' and return mouse
+            physical_click(self.hwnd, target_x, target_y, right=False)
+            time.sleep(0.05)
+            win32api.SetCursorPos((orig_x, orig_y))
+            print("[TRADE] Item sold and confirmed.")
+        else:
+            print("[TRADE] Could not find OK button near mouse.")
+            # Return mouse anyway in case of failure
+            win32api.SetCursorPos((orig_x, orig_y))
 
     def setChatStatus(self,status = "on"):
         cur_status = self.getChatStatus()
@@ -2342,44 +2586,302 @@ class Bot:
         self.setChatStatus('off')
 
         return
+    
+    def cycle_map_scale(self):
+        """Cycles the map scale: 1 -> 2 -> 4 -> 1"""
+        if self.map_scale == 1: self.map_scale = 2
+        elif self.map_scale == 2: self.map_scale = 4
+        else: self.map_scale = 1
+        print(f"[MAP] Manual Scale set to: {self.map_scale} px/tile")
+
     def manageKeys(self):
-        if self.key_pressed == keyboard.Key.page_up:
-            bot.attack.set(value = not bot.attack.get())
-        elif self.key_pressed == keyboard.Key.page_down:
-            bot.follow_party.set(value = not bot.follow_party.get())
-        elif self.key_pressed == keyboard.Key.end:
-            bot.use_area_rune.set(value = not bot.use_area_rune.get())
-        elif self.key_pressed == keyboard.Key.alt_gr:
-            pass
-            #self.sellAllNPC()
+        if not self.key_pressed:
+            return
+
+        # 'keyboard' library uses string names
+        key = self.key_pressed.lower()
+
+        # --- GLOBAL KEYS ---
+        if key == 'page up':
+            self.attack.set(not self.attack.get())
+        elif key == 'page down':
+            self.follow_party.set(not self.follow_party.get())
+        elif key == 'end':
+            self.use_area_rune.set(not self.use_area_rune.get())
+        if self.key_pressed == keyboard.Key.insert: # Or any key you prefer
+            self.cycle_map_scale()
+        # --- FOREGROUND-ONLY KEYS ---
+        if isTopWindow(self.hwnd):
+            if key == 'f11':
+                self.mark_at_mouse()
+            elif key == 'f12':
+                self.mark_at_player()
+
         self.key_pressed = False
     
-    def test(self):
-        print("test")
-        #offset, error, ss_color, win_color = img.sync_screenshot_with_pixel(self.hwnd, (100, 100, 300, 300), (10, 10))
-        #print("Best offset:", offset)
-        #print("Error:", error)
-        #print("Screenshot color:", ss_color)
-        #print("Window color:", win_color)
+    def manageKeysSync(self):
+        """
+        Checks for key presses synchronously to avoid background thread crashes.
+        """
+        # --- GLOBAL KEYS ---
+        if kb.is_pressed('page up'):
+            if not self.key_debounce: # Simple flag to prevent rapid toggling
+                self.attack.set(not self.attack.get())
+                self.key_debounce = True
+        elif kb.is_pressed('page down'):
+            if not self.key_debounce:
+                self.follow_party.set(not self.follow_party.get())
+                self.key_debounce = True
+        elif kb.is_pressed('insert'): # Or any key you prefer
+            if not self.key_debounce:
+                self.cycle_map_scale()
+                self.key_debounce = True
+        else:
+            self.key_debounce = False # Reset debounce when key is released
+
+        # --- FOREGROUND KEYS ---
+        if isTopWindow(self.hwnd):
+            if kb.is_pressed('f11'):
+                self.mark_at_mouse()
+            elif kb.is_pressed('f12'):
+                self.mark_at_player()
+            elif kb.is_pressed('f10'): # New Sell Hotkey
+                if not self.delays.allow("manual_mark", base_ms=500): return
+                self.sell_item_at_mouse()
+
+
+    def detect_minimap_scale(self, map_img):
+        try:
+            # Get dimensions and constants
+            mh, mw = map_img.shape[:2]
+            cx, cy = mw // 2, mh // 2
+            TERRAIN = np.array(BotConstants.OBSTACLES + BotConstants.WALKABLE, dtype=np.uint8)
+
+            # Define scan strips (Wider range to get more data points in one go)
+            x_start, x_end = max(0, cx - 90), min(mw, cx + 90)
+            y_start, y_end = max(0, cy - 60), min(mh, cy + 60)
+
+            strips = [
+                map_img[np.clip(cy - 40, 0, mh-1), x_start:x_end], 
+                map_img[np.clip(cy + 40, 0, mh-1), x_start:x_end], 
+                map_img[y_start:y_end, np.clip(cx + 45, 0, mw-1)].reshape(-1, 3),
+                map_img[y_start:y_end, np.clip(cx - 45, 0, mw-1)].reshape(-1, 3)
+            ]
+
+            distances = []
+            for strip in strips:
+                if strip.size == 0: continue
+                # Mask pixels that are known terrain
+                is_terrain = np.any(np.all(strip[:, None] == TERRAIN, axis=-1), axis=-1)
+                
+                last_idx = -1
+                for i in range(1, len(strip)):
+                    if is_terrain[i] and is_terrain[i-1]:
+                        if not np.array_equal(strip[i], strip[i-1]):
+                            if last_idx != -1:
+                                d = i - last_idx
+                                if 1 <= d <= 16: distances.append(d)
+                            last_idx = i
+
+            # --- INSTANT DECISION LOGIC ---
+            # If we don't find enough edges, we don't have enough data to change our mind.
+            if len(distances) < 3:
+                return self.map_scale
+
+            counts = Counter(distances)
+            
+            # 1. Evidence for Scale 1 (The most common zoom)
+            # If we see 1s or 3s, it's Scale 1.
+            if counts[1] > 0 or counts[3] > 0:
+                new_scale = 1
+            # 2. Evidence for Scale 2
+            # If no 1s, but we see 2s or 6s, it's Scale 2.
+            elif counts[2] > 0 or counts[6] > 0:
+                new_scale = 2
+            # 3. Scale 4
+            # If everything found is 4, 8, 12...
+            elif counts[4] > 0:
+                new_scale = 4
+            else:
+                # No change if results are ambiguous
+                return self.map_scale
+
+            if new_scale != self.map_scale:
+                print(f"[AUTO-SCALE] Instant switch detected: {new_scale}px/tile")
+                self.map_scale = new_scale
+
+            return self.map_scale
+
+        except Exception as e:
+            return self.map_scale
+
+    def get_local_collision_map(self):
+        map_img = img.screengrab_array(self.hwnd, self.s_Map.region)
+        if map_img is None: 
+            return None, self.map_scale
+
+        S = self.map_scale 
+        mh, mw = map_img.shape[0], map_img.shape[1]
+        cx, cy = mw // 2, mh // 2
+        
+        # 1. Prepare Obstacle Data (The Blacklist)
+        OBS = np.array(BotConstants.OBSTACLES, dtype=np.uint8)
+        
+        # 2. Vectorized Color Sampling
+        local_data = np.zeros((11, 15, 3), dtype=np.uint8)
+        for r in range(11):
+            for c in range(15):
+                px, py = cx + (c - 7) * S, cy + (r - 5) * S
+                if 0 <= px < mw and 0 <= py < mh:
+                    local_data[r, c] = map_img[py, px]
+                else:
+                    # Boundaries/Outside map treated as walls
+                    local_data[r, c] = [0, 0, 0] 
+
+        # 3. Terrain Check: "Blacklist" approach
+        # Marks are NOT in the obstacle list, so they will stay False (Walkable)
+        is_obstacle = np.zeros((11, 15), dtype=bool)
+        for r in range(11):
+            for c in range(15):
+                color = local_data[r, c]
+                # If the sampled pixel matches ANY known obstacle color exactly
+                if np.any(np.all(color == OBS, axis=-1)):
+                    is_obstacle[r, c] = True
+                else:
+                    # EVERYTHING ELSE (Marks, UI, Grass, Water, New terrain) is Walkable
+                    is_obstacle[r, c] = False
+
+        # 4. Initialize Grid
+        grid = np.zeros((11, 15), dtype=int)
+        grid[is_obstacle] = 1
+        grid[5, 7] = 3 # Player tile constant
+
+        # 5. Apply 3-Point Connectivity interpolation (Preserved)
+        # We KEEP this because it connects detected obstacles to form solid walls
+        if S == 1:
+            grid[5:7, 5:11] = 0; grid[3:9, 7:9] = 0; grid[5, 7] = 3
+            for c in [5, 6]: # WEST
+                if grid[4, c] == 1 and grid[7, c] == 1 and is_obstacle[5:7, c-1].all():
+                    grid[5:7, c] = 1
+            for c in [9, 10]: # EAST
+                if grid[4, c] == 1 and grid[7, c] == 1 and is_obstacle[5:7, c+1].all():
+                    grid[5:7, c] = 1
+            for r in [3, 4]: # NORTH
+                if grid[r, 6] == 1 and grid[r, 9] == 1 and is_obstacle[r-1, 7:9].all():
+                    grid[r, 7:9] = 1
+            for r in [7, 8]: # SOUTH
+                if grid[r, 6] == 1 and grid[r, 9] == 1 and is_obstacle[r+1, 7:9].all():
+                    grid[r, 7:9] = 1
+        else:
+            # Scale 2 and 4 interpolation
+            grid[4, 7] = 0; grid[6, 7] = 0; grid[5, 6] = 0; grid[5, 8] = 0
+            if is_obstacle[3, 7] and grid[4, 6] == 1 and grid[4, 8] == 1: grid[4, 7] = 1
+            if is_obstacle[7, 7] and grid[6, 6] == 1 and grid[6, 8] == 1: grid[6, 7] = 1
+            if is_obstacle[5, 5] and grid[4, 6] == 1 and grid[6, 6] == 1: grid[5, 6] = 1
+            if is_obstacle[5, 9] and grid[4, 8] == 1 and grid[6, 8] == 1: grid[5, 8] = 1
+
+        return grid, S
+    def get_player_grid_pos(self):  
+        """Standardized center of the 15x11 grid."""
+        return (5, 7) # (row, col)
+    
+    def visualize_monster_grid(self, collision_grid, current_s):
+        try:
+            # Skip if calculation failed
+            if collision_grid is None: return
+            
+            region = self.s_GameScreen.region
+            frame = img.screengrab_array(self.hwnd, region)
+            if frame is None: return
+            
+            vis = np.ascontiguousarray(frame, dtype=np.uint8)
+            overlay = vis.copy()
+            
+            # FLOAT MATH for perfect sync
+            gr_w, gr_h = self.s_GameScreen.getWidth(), self.s_GameScreen.getHeight()
+            tile_w_float = gr_w / 15.0
+            tile_h_float = gr_h / 11.0
+            
+            p_row, p_col = 5, 7
+
+            # --- DRAW UI ---
+
+            # --- DRAW GRID ---
+            for row in range(11):
+                for col in range(15):
+                    tx = int(col * tile_w_float)
+                    ty = int(row * tile_h_float)
+                    tx2 = int((col + 1) * tile_w_float)
+                    ty2 = int((row + 1) * tile_h_float)
+                    
+                    if row == p_row and col == p_col:
+                        cv2.rectangle(overlay, (tx, ty), (tx2, ty2), (0, 255, 0), 2)
+                    elif collision_grid is not None and collision_grid[row, col] == 1:
+                        cv2.rectangle(overlay, (tx, ty), (tx2, ty2), (180, 50, 0), -1)
+                    
+                    cv2.rectangle(vis, (tx, ty), (tx2, ty2), (45, 45, 45), 1)
+
+            # --- DRAW MONSTERS ---
+            if hasattr(self, 'monster_positions') and self.monster_positions:
+                for mx, my in self.monster_positions:
+                    m_col = int(mx / tile_w_float)
+                    m_row = int(my / tile_h_float)
+                    
+                    tx = int(m_col * tile_w_float)
+                    ty = int(m_row * tile_h_float)
+                    tx2 = int((m_col + 1) * tile_w_float)
+                    ty2 = int((m_row + 1) * tile_h_float)
+                    
+                    # IGNORE PLAYER (Safety Check)
+                    if m_col == p_col and m_row == p_row:
+                        continue
+                        
+                    cv2.rectangle(overlay, (tx, ty), (tx2, ty2), (0, 0, 150), -1)
+                    cv2.circle(vis, (int(mx), int(my)), 2, (0, 255, 0), -1)
+            # DRAW RUNE TARGETING (If any monsters detected)
+            if hasattr(self, 'best_rune_tile') and self.best_rune_tile:
+                tr, tc = self.best_rune_tile
+                # Draw the 7x7 mask area in faint Purple
+                for mr in range(-3, 4):
+                    for mc in range(-3, 4):
+                        if BotConstants.RUNE_MASK[mr+3, mc+3] == 1:
+                            rx = int((tc + mc) * tile_w_float)
+                            ry = int((tr + mr) * tile_h_float)
+                            rx2 = int((tc + mc + 1) * tile_w_float)
+                            ry2 = int((tr + mr + 1) * tile_h_float)
+                            # Draw a transparent-ish box
+                            cv2.rectangle(overlay, (rx, ry), (rx2, ry2), (255, 0, 255), -1)
+                
+                # Draw a target cross on the center
+                cx = int((tc + 0.5) * tile_w_float)
+                cy = int((tr + 0.5) * tile_h_float)
+                cv2.drawMarker(vis, (cx, cy), (255, 255, 255), cv2.MARKER_CROSS, 20, 2)
+            # DEBUG TEXT
+            cv2.putText(vis, f"ZOOM: {self.map_scale}x", (10, 30), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            
+            cv2.addWeighted(overlay, 0.4, vis, 0.6, 0, vis)
+            cv2.imshow("AI Spatial Vision", vis)
+            cv2.waitKey(1)
+        except Exception as e:
+            print("Visualization error:", e)
+            pass
+
 if __name__ == "__main__":
     
     bot = Bot()
     bot.updateFrame()
-    bot.test()
     bot.updateAllElements()
     bot.updateActionbarSlotStatus()
     bot.getPartyList()
-    def on_press(key):
-        #print('{0} pressed'.format(key))
-        bot.key_pressed = key
-    listener = keyboard.Listener(on_press=on_press)
-    listener.setDaemon(True)
-    listener.start()
+    def on_key_event(e):
+        bot.key_pressed = e.name # Stores strings like 'f11', 'page up'
+
+    kb.on_press(on_key_event)
     count = 0
     total_time = 0
     times = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
     start_time = time.time()
-    calibrate = False
     while(True): 
         # Check if GUI signaled exit
         if not bot.loop.get():
@@ -2388,29 +2890,15 @@ if __name__ == "__main__":
         bot.GUI.loop()
         bot.updateFrame()
         bot.updateWindowCoordinates()
+        bot.manageKeysSync()
         bot.checkAndDetectElements()
         bot.getBuffs()
-        #bot.cavebottest()
-        #bot.getMonstersAround(6,False,True)
-        #print(bot.waypoint_folder.get())
-        #bot.useAreaRune()
-        #bot.acceptPartyInvite()
-        #bot.getPartyAroundContours(9,False)
-        #img.compareImages([r"\party\follower_check.png",r"\party\leader_check.png"])
-        #break
-        #img.listColors("\party\leader_check.png")
-        #break
-        #bot.walkAwayFromMonsters()
-        #bot.updateMonsterPositions()
-        # execute bot.monsterCount() 1000 times and check the average time using timeInMillis()
+
         
         start = timeInMillis()
+        start_loop = time.perf_counter()
         current_time = int(time.time() - start_time)
-        times[0] = timeInMillis()
-        if calibrate:
-            bot.calibrate_actionbar_pixel()
-            print("Calibration finished. Please update your code and restart the bot.")
-            exit() # Exit the script after calibration is done
+
 
 
         #print(current_time % 10)
@@ -2419,96 +2907,77 @@ if __name__ == "__main__":
             #print("looting")
             if bot.loot_on_spot.get():
                 bot.lootAround(True)
-        times[1] = timeInMillis()
-        
+
+
+        # 1. Periodic Scale Detection (Every ~2 seconds)
+        if count % 50 == 0:
+            map_img = img.screengrab_array(bot.hwnd, bot.s_Map.region)
+            bot.map_scale = bot.detect_minimap_scale(map_img)
+
+        # 2. Update Basic States (Monsters, Buffs, etc)
         bot.monster_count = bot.monsterCount() 
-        
         if bot.monster_count > 0:
             bot.updateMonsterPositions()
+            bot.monster_positions = bot.get_filtered_monsters()
 
-        times[2] = timeInMillis()
-        #bot.getMonstersAround(bot.areaspell_area,False,False)
-        #if len(bot.party.keys()) > 0:w
-            #bot.updatePartyPositions()
-        
+        # 3. GENERATE COLLISION GRID (Calculated once per frame)
+        # This grid is now stored in bot.collision_grid and shared with all methods
+        bot.collision_grid, _ = bot.get_local_collision_map()
+
+        # 4. Logic methods can now simply read bot.collision_grid
+        if bot.attack.get():
+            bot.clickAttack()
+
+        if bot.cavebot.get():
+            # Method internal logic: Use self.collision_grid for A* or Kiting
+            bot.cavebottest()
+
+
+
         if bot.hp_heal.get():
             bot.manageHealth()
             bot.manageMagicShield()
-        times[3] = timeInMillis()
         if bot.mp_heal.get():
             bot.manageMana()
-        times[4] = timeInMillis()
-        if bot.attack.get():
-            bot.clickAttack()
-        times[5] = timeInMillis()
-
-        times[6] = timeInMillis()
 
         bot.manageKnightSupport()
 
-        # --- COMBAT LOGIC CHAIN ---
+       # Combat chain
         if bot.attack_spells.get():
-            # 1. Try Big Area Spells (e.g. UE/Wave) if density is high
-            did_aoe_spell = bot.attackAreaSpells()
-            
-            # 2. If no Big Spell, try Area Rune (GFB)
+            did_aoe = bot.attackAreaSpells()
             did_rune = False
-            if not did_aoe_spell and bot.use_area_rune.get():
+            if not did_aoe and bot.use_area_rune.get():
                 did_rune = bot.useAreaRune()
-            
-            # 3. If no AoE occurred, use Single Target Spell (Filler)
-            if not did_aoe_spell and not did_rune:
+            if not did_aoe and not did_rune:
                 bot.attackTargetSpells()
-        if bot.cavebot.get():
-            bot.cavebottest()
-            #if bot.vocation == "knight":
-            #    bot.cavebottest()
-            #else:
-            #    bot.cavebot_distance()
-        times[7] = timeInMillis()
+
+
         if bot._bool_value(bot.use_haste):
             bot.haste()
         if bot._bool_value(bot.use_food):
             bot.eat()
-        times[8] = timeInMillis()
         if bot.manage_equipment.get():
             bot.manageEquipment()
         #if bot.follow_party.get():
-        times[9] = timeInMillis()
         if bot.character_name != bot.party_leader.get():
             bot.manageFollow()
             if count%300 == 0:
                 #print("updating party list")
                 bot.getPartyList()
-        times[10] = timeInMillis()
-        if bot.key_pressed is not False:
-            bot.manageKeys()
-        times[11] = timeInMillis()
+
         if bot.use_area_rune.get() and bot.vocation != "knight":
             #if bot.monsterCount() > 0:
             if bot.vocation == "paladin":
                 bot.useAreaAmmo()
             else:
                 bot.useAreaRune()
-        times[12] = timeInMillis()
         if len(bot.party.keys()) > 0:
             bot.healParty()
-        #manageEquipment
-        '''
-        if bot.use_ring:
-            bot.manageRing()
-        if bot.use_amulet:
-            bot.manageAmulet()
-        '''
-        #listener.join()
-        
+
+        # 5. Visualization (Throttled for performance)
+        if count % 3 == 0:
+            bot.visualize_monster_grid(bot.collision_grid, bot.map_scale)
+
         
         count+=1
-        #for i in range(0,len(times)-1):
-        #    print(str(i) + " " + str(times[i+1]-times[i]))
-        end = timeInMillis()
-        duration = (end-start)
-        #total_time+=duration
-        #print("loop time: "+ str(round(duration, 3))+"ms average time: " + str(round(total_time/count, 3)) +"ms total time: " + str(round(total_time,3)) + "ms")
-        
-        
+

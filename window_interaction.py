@@ -58,3 +58,26 @@ def rclick_client(hwnd, cx, cy):
     lParam = win32api.MAKELONG(cx, cy)
     win32gui.PostMessage(hwnd, win32con.WM_RBUTTONDOWN, win32con.MK_RBUTTON, lParam)
     win32gui.PostMessage(hwnd, win32con.WM_RBUTTONUP, 0, lParam)
+
+def physical_click(hwnd, client_x, client_y, right=False):
+        """
+        Simulates a hardware-level click.
+        Automatically converts Client coordinates to Global Screen coordinates
+        to account for the Window Title Bar and Borders.
+        """
+        # 1. Global Screen Conversion
+        # This fixes the "clicking a bit up" issue by adding the title bar height
+        point = win32gui.ClientToScreen(hwnd, (int(client_x), int(client_y)))
+        screen_x, screen_y = point[0], point[1]
+
+        # 2. Teleport Cursor
+        win32api.SetCursorPos((screen_x, screen_y))
+        time.sleep(0.05) # Delay to ensure the game engine "sees" the mouse hover
+        
+        # 3. Inject Physical Mouse Event
+        down = win32con.MOUSEEVENTF_RIGHTDOWN if right else win32con.MOUSEEVENTF_LEFTDOWN
+        up = win32con.MOUSEEVENTF_RIGHTUP if right else win32con.MOUSEEVENTF_LEFTUP
+        
+        win32api.mouse_event(down, screen_x, screen_y, 0, 0)
+        time.sleep(0.05)
+        win32api.mouse_event(up, screen_x, screen_y, 0, 0)
