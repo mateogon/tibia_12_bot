@@ -59,6 +59,8 @@ class ModernBotGUI:
             'party_leader', 'waypoint_folder',
             'use_lure_walk', 'lure_walk_ms', 'lure_stop_ms',
             'use_recenter', 'use_kiting',
+            'use_magic_shield',
+            "use_static_lure",
         ]
         
         for key in keys:
@@ -172,6 +174,9 @@ class ModernBotGUI:
         self._switch(f_tools, "Use Food", "use_food")
         self._switch(f_tools, "Equip/Unequip Equipment", "manage_equipment")
 
+        if self.vocation in ["druid", "sorcerer"]:
+            self._switch(f_tools, "Keep Magic Shield (>50% MP)", "use_magic_shield")
+
         if self.vocation == "knight":
             self._switch(f_tools, "Use Exeta Res", "res")
             self._switch(f_tools, "Use Amp Res", "amp_res")
@@ -256,7 +261,8 @@ class ModernBotGUI:
                                   fg_color="#D2691E", hover_color="#A0522D", 
                                   command=self.bot.reset_marks_history)
         reset_btn.pack(side="right")
-
+        if self.vocation == "knight":
+            self._switch(f_nav, "Static Party Lure (Skull/Lock/etc)", "use_static_lure")
         # Follow logic (Now correctly placed inside Navigation before other sections start)
         self._switch(f_nav, "Follow Party Leader", "follow_party")
         self._entry_row(f_nav, "Party Leader Name:", "party_leader")
@@ -485,7 +491,7 @@ class ModernBotGUI:
         self.bot.profile["spells"]["target_slots"] = list(getattr(self.bot, "target_spells_slots", []))
 
         # 4) Commit to file (NEW signature: char + vocation)
-        self.bot.config.update_config(self.bot.character_name, self.bot.vocation, self.bot.profile)
+        self.bot.config.update_config(self.bot.server_id, self.bot.character_name, self.bot.vocation, self.bot.profile)
 
         print(f"[GUI] Saved configuration for {self.bot.character_name} ({self.bot.vocation}) to JSON.")
 

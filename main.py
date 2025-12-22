@@ -46,9 +46,8 @@ class Bot:
         # 2. Config & Profile Loading
         self.config = cm.ConfigManager()
         char_info = self.config.get_character_info(self.character_name)
-        self.vocation = char_info["vocation"]
         self.areaspell_area = char_info["spell_area"]
-        self.profile = self.config.get_config(self.character_name, self.vocation)
+        self.profile = self.config.get_config(self.server_id, self.character_name, self.vocation)
         
         # --- DATA MUST BE READY BEFORE GUI BUILDS ---
         self.slots = self.profile["slots"]
@@ -69,12 +68,17 @@ class Bot:
         # 6. FINALIZE GUI (This builds the tabs that need self.slots)
         # We call this LAST because now the bot has everything defined
         self.GUI.setup_vars_and_ui()
+        # boss room
+        self.hallway_images = []      # List of (image, coordinate)
+        self.is_auto_walking = False  # Toggle state
+        self.last_tp_pos = None       # To avoid clicking the same one twice
+        self.active_sequence = None   # Puede ser "enter" o "exit"
+        self.sequence_complete = False
 
     def _setup_system(self):
         self.base_directory = os.getcwd()
-        self.hwnd = choose_capture_window()
+        self.hwnd, self.server_id, self.character_name, self.vocation = choose_capture_window()
         self.bg = BackgroundFrameGrabber(self.hwnd, max_fps=50)
-        self.character_name = self.getCharacterName()
         
         if self.character_name is None:
             print("You are not logged in.")
@@ -172,7 +176,8 @@ class Bot:
         self.lure_stutter_active = False
         self.last_lure_action_time = time.time()
         self.lure_phase = "walking" # "walking" o "stopping"
-        
+        self.lure_trip_active = False # Indica si el EK está en el recorrido de lure
+
         # Tiempos configurables (ms)
         self.lure_walk_duration = 0.6  # Segundos caminando
         self.lure_stop_duration = 0.4  # Segundos parado
@@ -190,6 +195,7 @@ class Bot:
         self.last_stuck_colors = []
         self.stuck_counter = 0
         self.best_rune_tile = None
+        self.key_debounce = False
     def _init_timers(self):
         self.normal_delay = getNormalDelay()
         self.delays = DelayManager(default_jitter_ms_fn=getNormalDelay)
@@ -226,6 +232,7 @@ class Bot:
         self.use_lure_walk = BooleanVar(value=s.get("use_lure_walk", False))
         self.lure_walk_ms  = IntVar(value=int(s.get("lure_walk_ms", 600)))
         self.lure_stop_ms  = IntVar(value=int(s.get("lure_stop_ms", 400)))
+        self.use_static_lure = BooleanVar(value=s.get("use_static_lure", False))
         self.use_recenter = BooleanVar(value=s.get("use_recenter", False))
         self.use_kiting   = BooleanVar(value=s.get("use_kiting", False))
         self.follow_party     = BooleanVar(value=s.get("follow_party", False))
@@ -239,6 +246,7 @@ class Bot:
         self.amp_res          = BooleanVar(value=s.get("amp_res", False))
         self.use_haste        = BooleanVar(value=s.get("use_haste", True))
         self.use_food         = BooleanVar(value=s.get("use_food", True))
+        self.use_magic_shield = BooleanVar(value=s.get("use_magic_shield", False))
 
         self.hp_thresh_high        = IntVar(value=int(s.get("hp_thresh_high", 90)))
         self.hp_thresh_low         = IntVar(value=int(s.get("hp_thresh_low", 70)))
@@ -860,20 +868,27 @@ class Bot:
         return max(val)
     
     def manageMagicShield(self):
-        if self.vocation in ["druid", "sorcerer"]:
-            ms_slot = self.slots.get("magic_shield")
-            cancel_slot = self.slots.get("cancel_magic_shield")
-            
-            if ms_slot is None or cancel_slot is None: return
+        """
+        Mantiene el Magic Shield activo si el mana es saludable (>50%)
+        y no tenemos el buff actualmente.
+        """
+        # 1. Solo para Magos (y si está habilitado en la GUI)
+        if self.vocation not in ["druid", "sorcerer"] or not self.use_magic_shield.get():
+            return
 
-            if self.hppc <= self.hp_thresh_low.get() or self.getBurstDamage() > 40:
-                if self.slot_status[ms_slot] and not self.magic_shield_enabled:
-                    self.clickActionbarSlot(ms_slot)
-                    self.magic_shield_enabled = True
-            else:
-                if self.magic_shield_enabled and self.monsterCount() == 0:
-                    self.clickActionbarSlot(cancel_slot)
-                    self.magic_shield_enabled = False
+        ms_slot = self.slots.get("magic_shield")
+        if ms_slot is None:
+            return
+
+        # 2. Verificar estado actual (vía self.buffs poblado por getBuffs)
+        has_magic_shield = self.buffs.get('magicshield', False)
+
+        # 3. Lógica: Si NO tengo el escudo Y el mana es > 50%
+        if not has_magic_shield and self.mppc > 50:
+            # Intentar castear (incluye check de cooldown interno)
+            if self.checkActionBarSlotCooldown(ms_slot):
+                if self.clickActionbarSlot(ms_slot):
+                    print("[BUFF] Magic Shield reactivado (Mana > 50%)")
     
     def manageHealth(self):
         self.getHealth()
@@ -1844,12 +1859,76 @@ class Bot:
         except:
             return 100
 
-
     def healParty(self):
         if self.vocation == "druid":
             hppc = self.getPartyLeaderVitals()
             if hppc < 80:
                 self.clickActionbarSlot(self.slots.get("sio"))
+
+    def execute_static_party_lure(self):
+        """
+        Lure dinámico: Si una marca no es visible, busca la siguiente en la secuencia.
+        Siempre prioriza terminar el ciclo volviendo a 'skull'.
+        """
+        self.monster_count = self.monsterCount()
+        marks = self.getClosestMarks() # Busca la marca actual (self.current_mark)
+        
+        # --- ESTADO 1: TANQUEANDO / ESPERANDO EN SKULL ---
+        if not self.lure_trip_active:
+            if self.current_mark == "skull":
+                # Si estamos en la base y el spawn está limpio, iniciamos
+                if self.monster_count <= self.kill_stop_amount.get():
+                    print("[STATIC LURE] Iniciando ronda de lure...")
+                    self.lure_trip_active = True
+                    self.nextMark() 
+                    return
+            else:
+                self.current_mark = "skull"
+                self.current_mark_index = 0
+
+        # --- ESTADO 2: VIAJE DE LURE ACTIVO ---
+        if self.lure_trip_active:
+            # --- LÓGICA DE FLEXIBILIDAD (Si no ve la marca actual) ---
+            if not marks:
+                found_next = False
+                # Escaneamos las marcas que siguen en la lista
+                for i in range(self.current_mark_index + 1, len(self.mark_list)):
+                    temp_mark = self.mark_list[i]
+                    # Si alguna de las siguientes marcas es visible en el minimapa
+                    if img.locateImage(self.hwnd, f"map_marks/{temp_mark}.png", self.s_Map.region, 0.90):
+                        print(f"[STATIC LURE] No veo {self.current_mark}, saltando a {temp_mark}")
+                        self.current_mark_index = i
+                        self.current_mark = temp_mark
+                        found_next = True
+                        break
+                
+                # Si llegamos al final de la lista y no vimos NADA, volvemos a Skull
+                if not found_next:
+                    if self.current_mark != "skull":
+                        print("[STATIC LURE] Sin marcas visibles. Abortando regreso a 'skull'...")
+                        self.current_mark = "skull"
+                        self.current_mark_index = 0
+                return
+
+            # --- LÓGICA DE MOVIMIENTO (Si hay marca visible) ---
+            dist, abs_pos, _ = marks[0]
+            
+            # Threshold dinámico: 6 para skull, 15 para el resto
+            arrival_threshold = 6 if self.current_mark == "skull" else 15
+
+            if dist <= arrival_threshold:
+                if self.current_mark == "skull":
+                    print("[STATIC LURE] Regreso exitoso. Tanqueando...")
+                    self.lure_trip_active = False
+                    self.clickStop()
+                else:
+                    print(f"[STATIC LURE] Marca {self.current_mark} alcanzada. Siguiente...")
+                    self.nextMark()
+                return
+
+            # Ejecutar caminata
+            if self.delays.allow("walk", base_ms=200):
+                click_client(self.hwnd, abs_pos[0], abs_pos[1])
 
     def cavebottest(self):
         # 1. Update basic state for this frame
@@ -2587,13 +2666,6 @@ class Bot:
 
         return
     
-    def cycle_map_scale(self):
-        """Cycles the map scale: 1 -> 2 -> 4 -> 1"""
-        if self.map_scale == 1: self.map_scale = 2
-        elif self.map_scale == 2: self.map_scale = 4
-        else: self.map_scale = 1
-        print(f"[MAP] Manual Scale set to: {self.map_scale} px/tile")
-
     def manageKeys(self):
         if not self.key_pressed:
             return
@@ -2608,8 +2680,7 @@ class Bot:
             self.follow_party.set(not self.follow_party.get())
         elif key == 'end':
             self.use_area_rune.set(not self.use_area_rune.get())
-        if self.key_pressed == keyboard.Key.insert: # Or any key you prefer
-            self.cycle_map_scale()
+
         # --- FOREGROUND-ONLY KEYS ---
         if isTopWindow(self.hwnd):
             if key == 'f11':
@@ -2632,9 +2703,15 @@ class Bot:
             if not self.key_debounce:
                 self.follow_party.set(not self.follow_party.get())
                 self.key_debounce = True
-        elif kb.is_pressed('insert'): # Or any key you prefer
+
+        elif kb.is_pressed('+'):
             if not self.key_debounce:
-                self.cycle_map_scale()
+                self.execute_boss_hotkey() # Activa secuencia 'enter'
+                self.key_debounce = True
+
+        if kb.is_pressed('-'):
+            if not self.key_debounce:
+                self.execute_exit_boss_sequence() # Activa secuencia 'exit'
                 self.key_debounce = True
         else:
             self.key_debounce = False # Reset debounce when key is released
@@ -2649,7 +2726,199 @@ class Bot:
                 if not self.delays.allow("manual_mark", base_ms=500): return
                 self.sell_item_at_mouse()
 
+    # Ensure these are defined in your class constants or __init__
+    COLOR_ROOM_BGR      = [51, 102, 153]    # #996633 (Brown Floor)
+    COLOR_RED_TILE_BGR  = [0, 51, 255]      # #FF3300 (Red Tile)
+    COLOR_GREY_TILE_BGR = [153, 153, 153]   # #999999 (Grey Tile)
+    COLOR_TP_BGR        = [0, 255, 255]     # #FFFF00 (Yellow TP)
 
+    def find_and_enter_tp(self, map_img):
+        """Finds the closest yellow TP cluster in the provided map image and clicks it."""
+        map_reg = self.s_Map.region
+        
+        # 1. Mask exact yellow pixels
+        tp_mask = np.all(map_img == self.COLOR_TP_BGR, axis=-1).astype(np.uint8) * 255
+
+        # 2. Use contours to find the cluster center
+        contours, _ = cv2.findContours(tp_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if not contours:
+            print("[BOSS] No yellow TP pixels found on minimap.")
+            return
+
+        map_h, map_w = map_img.shape[:2]
+        map_center = np.array([map_w // 2, map_h // 2])
+        
+        best_point = None
+        min_dist = float('inf')
+
+        for cnt in contours:
+            M = cv2.moments(cnt)
+            if M["m00"] == 0: continue
+            
+            cX = int(M["m10"] / M["m00"])
+            cY = int(M["m01"] / M["m00"])
+            
+            dist = np.linalg.norm(np.array([cX, cY]) - map_center)
+            
+            if dist < min_dist:
+                min_dist = dist
+                best_point = (map_reg[0] + cX, map_reg[1] + cY)
+
+        if best_point:
+            print(f"[BOSS] Moving to TP cluster center: {best_point}")
+            click_client(self.hwnd, best_point[0], best_point[1])
+
+    def detect_lever_line_minimap(self, map_img):
+        """
+        Busca la secuencia horizontal de tiles grises.
+        Retorna: (coordenadas, se_encontro_rojo)
+        """
+        map_reg = self.s_Map.region
+        h, w, _ = map_img.shape
+        S = self.map_scale 
+
+        for y in range(h):
+            for x in range(w - S):
+                if list(map_img[y, x]) == self.COLOR_GREY_TILE_BGR:
+                    # Confirmamos que es una línea viendo el siguiente tile a la derecha
+                    if x + S < w and list(map_img[y, x + S]) == self.COLOR_GREY_TILE_BGR:
+                        
+                        # Buscamos el tile ROJO a la izquierda para tener la referencia exacta
+                        if x - S >= 0 and list(map_img[y, x - S]) == self.COLOR_RED_TILE_BGR:
+                            return (map_reg[0] + (x - S), map_reg[1] + y), True
+                        
+                        # Si no hay rojo (mapa negro), retornamos el primer gris para "descubrir"
+                        return (map_reg[0] + x, map_reg[1] + y), False
+        return None, False
+              
+    def get_vocation_delay(self):
+        order = ["knight", "paladin", "sorcerer", "druid"]
+        idx = order.index(self.vocation.lower()) if self.vocation.lower() in order else 4
+        return idx * 0.4 
+
+    def execute_boss_hotkey(self):
+        """Trigger inicial para ENTRADA"""
+        delay = self.get_vocation_delay()
+        print(f"[SEQUENCE] {self.vocation} espera {delay}s...")
+        self.GUI.root.after(int(delay * 1000), lambda: self._set_active_sequence("enter"))
+
+    def execute_exit_boss_sequence(self):
+        """Trigger inicial para SALIDA"""
+        delay = self.get_vocation_delay()
+        print(f"[SEQUENCE] {self.vocation} espera {delay}s...")
+        self.GUI.root.after(int(delay * 1000), lambda: self._set_active_sequence("exit"))
+
+    def _set_active_sequence(self, seq_type):
+        self.active_sequence = seq_type
+
+    def manage_boss_sequences(self):
+        """Ejecuta el flujo completo de entrada o salida de forma automática."""
+        if not self.active_sequence:
+            return
+
+        map_reg = self.s_Map.region
+        map_img = img.screengrab_array(self.hwnd, map_reg)
+        if map_img is None: return
+
+        room_type = self.detect_room_type_minimap(map_img)
+        
+        # --- SECUENCIA ENTRAR (+) ---
+        if self.active_sequence == "enter":
+            if room_type == 0: # Hallway
+                if self.delays.due("walk"):
+                    self.find_and_enter_tp(map_img)
+                    self.delays.trigger("walk", base_ms=2500)
+            
+            elif room_type == 1: # Lever Room
+                line_pos, is_red_tile = self.detect_lever_line_minimap(map_img)
+                if line_pos:
+                    if is_red_tile:
+                        # If arrived, stop sequence immediately
+                        if self.handle_minimap_lever_positioning(line_pos):
+                            print(f"[SEQUENCE] {self.vocation} LISTO. Terminando secuencia.")
+                            self.active_sequence = None 
+                    else:
+                        if self.delays.due("walk"):
+                            print("[SEQUENCE] Descubriendo sala del lever...")
+                            click_client(self.hwnd, line_pos[0], line_pos[1])
+                            self.delays.trigger("walk", base_ms=1500)
+                else:
+                    if self.delays.due("walk"):
+                        click_client(self.hwnd, self.s_Map.center[0], self.s_Map.center[1])
+                        self.delays.trigger("walk", base_ms=1000)
+
+        # --- SECUENCIA SALIR (-) ---
+        elif self.active_sequence == "exit":
+            if room_type == 2 or room_type == 1: # Boss o Lever Room
+                if self.delays.due("walk"):
+                    print("[SEQUENCE] Saliendo por TP...")
+                    self.find_and_enter_tp(map_img)
+                    self.delays.trigger("walk", base_ms=2500)
+            
+            elif room_type == 0: # Ya salimos al Hallway
+                print("[SEQUENCE] Saliendo al siguiente boss...")
+                self.auto_walk_tp_hall()
+                self.active_sequence = None
+
+    def handle_minimap_lever_positioning(self, red_map_pos):
+        """Calculates destination based on vocation and moves character."""
+        # Knight(1), Paladin(2), Sorcerer(3), Druid(4)
+        vocation_map = {
+            "knight": 1,
+            "paladin": 2,
+            "sorcerer": 3,
+            "druid": 4
+        }
+        target_idx = vocation_map.get(self.vocation.lower(), 5)
+        S = self.map_scale 
+
+        # Destination on minimap relative to the red tile
+        dest_x = red_map_pos[0] + (target_idx * S)
+        dest_y = red_map_pos[1]
+
+        map_reg = self.s_Map.region
+        current_x = (map_reg[0] + map_reg[2]) // 2
+        current_y = (map_reg[1] + map_reg[3]) // 2
+        
+        dist = sqrt((dest_x - current_x)**2 + (dest_y - current_y)**2)
+        
+        # INCREASED THRESHOLD: 0.8 tiles instead of 0.5 for stability
+        if dist > (S * 0.8):
+            if self.delays.due("walk"):
+                # Only log when we actually click
+                print(f"[BOSS] {self.vocation} moviéndose al tile {target_idx} (dist: {round(dist, 2)})")
+                click_client(self.hwnd, dest_x, dest_y)
+                self.delays.trigger("walk", base_ms=1500)
+            return False
+        else:
+            print(f"[BOSS] {self.vocation} ha llegado a su posición final.")
+            return True
+    
+    def detect_room_type_minimap(self, map_img):
+        map_reg = self.s_Map.region
+        mw, mh = map_img.shape[1], map_img.shape[0]
+        cx, cy = mw // 2, mh // 2
+        S = self.map_scale 
+
+        brown_count = 0
+        has_grey_line = False
+
+        for r_tile in range(-6, 7):
+            for c_tile in range(-6, 7):
+                px = cx + (c_tile * S)
+                py = cy + (r_tile * S)
+                if 0 <= px < mw and 0 <= py < mh:
+                    pixel = list(map_img[py, px])
+                    if pixel == self.COLOR_ROOM_BGR:
+                        brown_count += 1
+                    if pixel == self.COLOR_GREY_TILE_BGR:
+                        has_grey_line = True
+
+        if brown_count > 3:
+            return 1 if has_grey_line else 2
+        return 0
+    
     def detect_minimap_scale(self, map_img):
         try:
             # Get dimensions and constants
@@ -2866,14 +3135,224 @@ class Bot:
         except Exception as e:
             print("Visualization error:", e)
             pass
+    
+    def debug_boss_tp_minimap(self):
+        """Visualizes TPs, walk target, and state info."""
+        map_reg = self.s_Map.region
+        map_img = img.screengrab_array(self.hwnd, map_reg)
+        if map_img is None: return
 
+        scale_factor = 3
+        vis_frame = cv2.resize(map_img, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_NEAREST)
+        h, w, _ = map_img.shape
+        S = self.map_scale
+        found_tps = self.find_boss_tps_list(map_img)
+
+        for x, y in found_tps:
+            vx, vy = x * scale_factor, y * scale_factor
+            cv2.rectangle(vis_frame, (vx - (S*scale_factor)//2, vy - (S*scale_factor)//2),
+                          (vx + (S*scale_factor)//2, vy + (S*scale_factor)//2), (0, 255, 0), 1)
+
+        if hasattr(self, 'current_walk_target') and self.current_walk_target:
+            tx_rel, ty_rel = self.current_walk_target[0] - map_reg[0], self.current_walk_target[1] - map_reg[1]
+            v_tx, v_ty = tx_rel * scale_factor, ty_rel * scale_factor
+            cv2.drawMarker(vis_frame, (v_tx, v_ty), (255, 0, 0), cv2.MARKER_CROSS, 8, 2)
+            cx, cy = (w // 2) * scale_factor, (h // 2) * scale_factor
+            cv2.line(vis_frame, (cx, cy), (v_tx, v_ty), (255, 255, 0), 1)
+
+        cv2.putText(vis_frame, f"Scale: {S}px/t | TPs: {len(found_tps)}", (10, 20), 0, 0.4, (255, 255, 255), 1)
+        cv2.imshow("Boss TP Scanner Debug", vis_frame)
+        cv2.waitKey(1)
+        return found_tps
+    
+    def get_minimap_fingerprint(self, map_img):
+        """Crops the center 1/3 of the minimap and removes the player cross."""
+        h, w = map_img.shape[:2]
+        # Center 1/3 dimensions
+        ch, cw = h // 3, w // 3
+        start_y, start_x = (h - ch) // 2, (w - cw) // 2
+        
+        fingerprint = map_img[start_y:start_y+ch, start_x:start_x+cw].copy()
+        
+        # Remove Player Cross: The center of the fingerprint is the player.
+        # We paint a small black square over the absolute center.
+        f_cy, f_cx = ch // 2, cw // 2
+        fingerprint[f_cy-2:f_cy+3, f_cx-2:f_cx+3] = [0, 0, 0]
+        
+        return fingerprint
+
+    def auto_walk_tp_hall(self):
+        """Grid-based clockwise walker with explicit axis forcing for corners."""
+        map_reg = self.s_Map.region
+        map_img = img.screengrab_array(self.hwnd, map_reg)
+        if map_img is None: return
+
+        found_tps = self.find_boss_tps_list(map_img)
+        if not found_tps: return
+
+        h, w = map_img.shape[:2]
+        cx, cy = w // 2, h // 2
+        S = self.map_scale 
+
+        found_tps.sort(key=lambda p: sqrt((p[0]-cx)**2 + (p[1]-cy)**2))
+        pivot = found_tps[0]
+        px, py = pivot
+        
+        target_tp = None
+        force_axis = None # 'h' or 'v'
+
+        # --- CASE: RIGHT WALL ---
+        if px > cx + S:
+            col_neighbors = [tp for tp in found_tps if abs(tp[0] - px) < S and tp[1] > py + S]
+            if col_neighbors:
+                target_tp = sorted(col_neighbors, key=lambda p: p[1])[0]
+                force_axis = 'v'
+                print("[WALKER] Wall: RIGHT -> Action: Next Down")
+            else:
+                quadrant = [tp for tp in found_tps if tp[1] > cy + S and tp[0] < cx + S]
+                if quadrant:
+                    target_tp = sorted(quadrant, key=lambda p: p[0], reverse=True)[0]
+                    force_axis = 'h'
+                    print("[WALKER] Wall: RIGHT CORNER -> Action: Jump to Bottom Row")
+
+        # --- CASE: BOTTOM WALL ---
+        elif py > cy + S:
+            row_neighbors = [tp for tp in found_tps if abs(tp[1] - py) < S and tp[0] < px - S]
+            if row_neighbors:
+                target_tp = sorted(row_neighbors, key=lambda p: p[0], reverse=True)[0]
+                force_axis = 'h'
+                print("[WALKER] Wall: BOTTOM -> Action: Next Left")
+            else:
+                quadrant = [tp for tp in found_tps if tp[0] < cx - S and tp[1] < cy + S]
+                if quadrant:
+                    target_tp = sorted(quadrant, key=lambda p: p[1], reverse=True)[0]
+                    force_axis = 'v'
+                    print("[WALKER] Wall: BOTTOM CORNER -> Action: Jump to Left Wall")
+
+        # --- CASE: LEFT WALL ---
+        elif px < cx - S:
+            col_neighbors = [tp for tp in found_tps if abs(tp[0] - px) < S and tp[1] < py - S]
+            if col_neighbors:
+                target_tp = sorted(col_neighbors, key=lambda p: p[1], reverse=True)[0]
+                force_axis = 'v'
+                print("[WALKER] Wall: LEFT -> Action: Next Up")
+            else:
+                quadrant = [tp for tp in found_tps if tp[1] < cy - S and tp[0] > cx - S]
+                if quadrant:
+                    target_tp = sorted(quadrant, key=lambda p: p[0])[0]
+                    force_axis = 'h'
+                    print("[WALKER] Wall: LEFT CORNER -> Action: Jump to Top Row")
+
+        # --- CASE: TOP WALL ---
+        elif py < cy - S:
+            row_neighbors = [tp for tp in found_tps if abs(tp[1] - py) < S and tp[0] > px + S]
+            if row_neighbors:
+                target_tp = sorted(row_neighbors, key=lambda p: p[0])[0]
+                force_axis = 'h'
+                print("[WALKER] Wall: TOP -> Action: Next Right")
+            else:
+                quadrant = [tp for tp in found_tps if tp[0] > cx + S and tp[1] > cy - S]
+                if quadrant:
+                    target_tp = sorted(quadrant, key=lambda p: p[1])[0]
+                    force_axis = 'v'
+                    print("[WALKER] Wall: TOP CORNER -> Action: Jump to Right Wall")
+
+        if not target_tp:
+            target_tp = next((tp for tp in found_tps if sqrt((tp[0]-cx)**2 + (tp[1]-cy)**2) > S * 2), pivot)
+
+        # Update fingerprint before the move
+        fp = self.get_minimap_fingerprint(map_img)
+        self._manage_fingerprint_storage(fp)
+
+        self.execute_parallel_walk_click(target_tp, map_reg, map_img, cx, cy, force_axis)
+
+    def execute_parallel_walk_click(self, target_tp, map_reg, map_img, cx, cy, force_axis=None):
+        """Forces the click to be 2 tiles 'inward' from the target wall segment."""
+        tx, ty = target_tp
+        S = self.map_scale
+        
+        # 1. Determine local orientation
+        is_h_segment = list(map_img[ty, tx-S]) == self.COLOR_RED_TILE_BGR or \
+                       list(map_img[ty, tx+S]) == self.COLOR_RED_TILE_BGR
+        
+        is_v_segment = list(map_img[ty-S, tx]) == self.COLOR_RED_TILE_BGR or \
+                       list(map_img[ty+S, tx]) == self.COLOR_RED_TILE_BGR
+
+        # 2. Strict Directional Pushing with Override logic
+        # Priority: If we specifically know we are moving to a Vertical wall, use V-Push
+        if force_axis == 'v' or (is_v_segment and not is_h_segment):
+            off_x = 2*S if tx < cx else -2*S
+            final_click = (map_reg[0] + tx + off_x, map_reg[1] + ty)
+            print(f"[WALKER] V-Wall Push: {'Right' if off_x > 0 else 'Left'}")
+            
+        elif force_axis == 'h' or is_h_segment:
+            off_y = 2*S if ty < cy else -2*S
+            final_click = (map_reg[0] + tx, map_reg[1] + ty + off_y)
+            print(f"[WALKER] H-Wall Push: {'Down' if off_y > 0 else 'Up'}")
+        
+        else:
+            # Corner/Isolated fallback: Vector towards center
+            vx, vy = cx - tx, cy - ty
+            mag = max(1, sqrt(vx**2 + vy**2))
+            final_click = (map_reg[0] + tx + int((vx/mag)*2*S), map_reg[1] + ty + int((vy/mag)*2*S))
+            print("[WALKER] Corner/Isolated Push: Inward to Center")
+
+        # 3. Double Check: Destination floor safety
+        rel_x, rel_y = final_click[0] - map_reg[0], final_click[1] - map_reg[1]
+        if rel_x < 0 or rel_x >= map_img.shape[1] or rel_y < 0 or rel_y >= map_img.shape[0] or \
+           list(map_img[rel_y, rel_x]) != self.COLOR_GREY_TILE_BGR:
+            print("[WALKER] Warning: Destination not floor. Using 1-tile safe push.")
+            vx, vy = (1 if cx > tx else -1), (1 if cy > ty else -1)
+            final_click = (map_reg[0] + tx + vx*S, map_reg[1] + ty + vy*S)
+
+        self.current_walk_target = final_click
+        click_client(self.hwnd, final_click[0], final_click[1])
+        self.delays.trigger("walk", base_ms=3000)
+    
+    def _manage_fingerprint_storage(self, fp):
+        if not self.hallway_images:
+            self.hallway_images.append(fp)
+            return
+
+        # Compare current fingerprint with the VERY FIRST one we took
+        res = cv2.matchTemplate(fp, self.hallway_images[0], cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _ = cv2.minMaxLoc(res)
+        
+        if max_val > 0.96 and len(self.hallway_images) > 10:
+            print("[WALKER] FULL LAP DETECTED. Stopping walker.")
+            self.is_auto_walking = False
+            return
+        is_duplicate = False
+        for saved_fp in self.hallway_images:
+            res = cv2.matchTemplate(fp, saved_fp, cv2.TM_CCOEFF_NORMED)
+            if cv2.minMaxLoc(res)[1] > 0.95:
+                is_duplicate = True
+                break
+        
+        if not is_duplicate:
+            self.hallway_images.append(fp)
+
+    def find_boss_tps_list(self, map_img):
+        """Helper that returns a list of (x, y) relative coords for TPs."""
+        h, w = map_img.shape[:2]
+        S = self.map_scale
+        tps = []
+        for y in range(S, h - S):
+            for x in range(S, w - S):
+                if list(map_img[y, x]) == self.COLOR_TP_BGR:
+                    # Sandwich check
+                    if (list(map_img[y, x-S]) == self.COLOR_RED_TILE_BGR and list(map_img[y, x+S]) == self.COLOR_RED_TILE_BGR) or \
+                       (list(map_img[y-S, x]) == self.COLOR_RED_TILE_BGR and list(map_img[y+S, x]) == self.COLOR_RED_TILE_BGR):
+                        tps.append((x, y))
+        return tps
+    
 if __name__ == "__main__":
     
     bot = Bot()
     bot.updateFrame()
     bot.updateAllElements()
     bot.updateActionbarSlotStatus()
-    bot.getPartyList()
+    
     def on_key_event(e):
         bot.key_pressed = e.name # Stores strings like 'f11', 'page up'
 
@@ -2894,7 +3373,8 @@ if __name__ == "__main__":
         bot.checkAndDetectElements()
         bot.getBuffs()
 
-        
+        bot.manage_boss_sequences()
+
         start = timeInMillis()
         start_loop = time.perf_counter()
         current_time = int(time.time() - start_time)
@@ -2910,7 +3390,7 @@ if __name__ == "__main__":
 
 
         # 1. Periodic Scale Detection (Every ~2 seconds)
-        if count % 50 == 0:
+        if count % 30 == 0:
             map_img = img.screengrab_array(bot.hwnd, bot.s_Map.region)
             bot.map_scale = bot.detect_minimap_scale(map_img)
 
@@ -2929,8 +3409,10 @@ if __name__ == "__main__":
             bot.clickAttack()
 
         if bot.cavebot.get():
-            # Method internal logic: Use self.collision_grid for A* or Kiting
-            bot.cavebottest()
+            if bot.use_static_lure.get():
+                bot.execute_static_party_lure()
+            else:
+                bot.cavebottest() # Cavebot normal para luring convencional
 
 
 
@@ -2959,7 +3441,7 @@ if __name__ == "__main__":
         if bot.manage_equipment.get():
             bot.manageEquipment()
         #if bot.follow_party.get():
-        if bot.character_name != bot.party_leader.get():
+        if bot.character_name != bot.party_leader.get() and bot.follow_party.get():
             bot.manageFollow()
             if count%300 == 0:
                 #print("updating party list")
@@ -2967,16 +3449,16 @@ if __name__ == "__main__":
 
         if bot.use_area_rune.get() and bot.vocation != "knight":
             #if bot.monsterCount() > 0:
-            if bot.vocation == "paladin":
-                bot.useAreaAmmo()
-            else:
-                bot.useAreaRune()
+            #if bot.vocation == "paladin":
+                #bot.useAreaAmmo()
+            #else:
+            bot.useAreaRune()
         if len(bot.party.keys()) > 0:
             bot.healParty()
 
         # 5. Visualization (Throttled for performance)
-        if count % 3 == 0:
-            bot.visualize_monster_grid(bot.collision_grid, bot.map_scale)
+        #if count % 3 == 0:
+        #    bot.visualize_monster_grid(bot.collision_grid, bot.map_scale)
 
         
         count+=1

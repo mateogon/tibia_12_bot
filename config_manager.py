@@ -10,7 +10,9 @@ GUI_BOOL_KEYS = [
     "loop", "attack", "attack_spells", "hp_heal", "mp_heal",
     "manual_loot", "cavebot", "res", "follow_party", "use_area_rune",
     "manage_equipment", "loot_on_spot", "amp_res", "show_area_rune_target",
-    "use_utito", 'use_haste', 'use_food',"use_lure_walk", "use_recenter", "use_kiting"
+    "use_utito", 'use_haste', 'use_food',"use_lure_walk", "use_recenter", "use_kiting",
+    "use_magic_shield", 
+    "use_static_lure",
 ]
 GUI_INT_KEYS = [
     "hp_thresh_high", "hp_thresh_low", "mp_thresh",
@@ -29,6 +31,7 @@ BASE_SETTINGS = {
     "mp_heal": True,
     "manual_loot": False,
     "cavebot": False,
+    "use_static_lure": False,
     "use_lure_walk": False,
     "lure_walk_ms": 600,
     "lure_stop_ms": 400,
@@ -42,8 +45,9 @@ BASE_SETTINGS = {
     "loot_on_spot": False,
     "show_area_rune_target": True,
     "use_utito": False,
-    "use_haste": True,
+    "use_haste": False,
     "use_food": False,
+    "use_magic_shield": False,
     # ints
     "hp_thresh_high": 95,
     "hp_thresh_low": 75,
@@ -54,7 +58,7 @@ BASE_SETTINGS = {
     "kill_stop_amount": 1,
 
     # strings
-    "party_leader": "",
+    "party_leader": "Mateogon",
     "waypoint_folder": "test",
 }
 
@@ -119,14 +123,14 @@ DEFAULTS = {
             "ring": 20, "amulet": 19, "weapon": 17, "helmet": 16, "armor": 18, "shield": 21,
             "area_rune": 5,
         },
-        "spells": {"area_slots": [3, 4, 5], "target_slots": [6, 7]},
+        "spells": {"area_slots": [4,5,6], "target_slots": [8]},
         "settings": {
             "hp_thresh_high": 90, "hp_thresh_low": 60, "mp_thresh": 10,
             "res": True,
             "amp_res": False,
             "use_utito": True,
-            "use_haste": True,
-            "use_food": True,
+            "use_haste": False,
+            "use_food": False,
             "use_area_rune": False,
             "min_monsters_spell": 2, "min_monsters_rune": 1,
             "kill_amount": 5, "kill_stop_amount": 1,
@@ -137,67 +141,69 @@ DEFAULTS = {
     "druid": make_default({
         "slots": {
             "heal_high": 0, "heal_low": 1, "mana": 2,
-            "sio": 13, "haste": 10, "food": 12, "area_rune": 8,
+            "sio": 13, "haste": 10, "food": 12, "area_rune": 9,
             "magic_shield": 15, "cancel_magic_shield": 31,
             "ring": 20, "amulet": 19,
         },
-        "spells": {"area_slots": [3, 4], "target_slots": [6, 7]},
+        "spells": {"area_slots": [4, 5], "target_slots": [8]},
         "settings": {
             "hp_thresh_high": 95, "hp_thresh_low": 75, "mp_thresh": 50,
             "res": False,
             "amp_res": False,
             "use_utito": False,
-            "use_haste": True,
-            "use_food": True,
+            "use_haste": False,
+            "use_food": False,
+            "use_magic_shield": True,
             "use_area_rune": True,
             "min_monsters_spell": 1, "min_monsters_rune": 2,
             "kill_amount": 5, "kill_stop_amount": 1,
             "use_recenter": False,
-            "use_kiting": True, # Default ON for Mages
+            "use_kiting": False, # Default ON for Mages
         },
     }),
     "sorcerer": make_default({
         "slots": {
             "heal_high": 0, "heal_low": 1, "mana": 2,
-            "haste": 10, "food": 12, "area_rune": 8,
+            "haste": 10, "food": 12, "area_rune": 9,
             "magic_shield": 15, "cancel_magic_shield": 31,
             "ring": 20, "amulet": 19,
         },
-        "spells": {"area_slots": [3, 4], "target_slots": [6, 7]},
+        "spells": {"area_slots": [4, 5], "target_slots": [8]},
         "settings": {
             "hp_thresh_high": 95, "hp_thresh_low": 70, "mp_thresh": 50,
             "res": False,
             "amp_res": False,
             "use_utito": False,
-            "use_haste": True,
-            "use_food": True,
+            "use_haste": False,
+            "use_food": False,
+            "use_magic_shield": True,
             "use_area_rune": True,
             "min_monsters_spell": 1, "min_monsters_rune": 2,
             "kill_amount": 5, "kill_stop_amount": 1,
             "use_recenter": False,
-            "use_kiting": True, # Default ON for Mages
+            "use_kiting": False, # Default ON for Mages
         },
     }),
     "paladin": make_default({
         "slots": {
             "heal_high": 0, "heal_low": 1, "mana": 2,
-            "haste": 10, "food": 12, "area_rune": 8,
+            "haste": 10, "food": 12, "area_rune": 9,
             "magic_shield": 15, "cancel_magic_shield": 31,
             "ring": 20, "amulet": 19,
         },
-        "spells": {"area_slots": [3, 4], "target_slots": [6, 7]},
+        "spells": {"area_slots": [4], "target_slots": [7,8]},
         "settings": {
             "hp_thresh_high": 92, "hp_thresh_low": 65, "mp_thresh": 40,
             "res": False,
             "amp_res": False,
-            "use_utito": True,
-            "use_haste": True,
-            "use_food": True,
+            "use_utito": False,
+            "use_haste": False,
+            "use_food": False,
             "use_area_rune": True,
             "min_monsters_spell": 3, "min_monsters_rune": 1,
             "kill_amount": 5, "kill_stop_amount": 1,
             "use_recenter": False,
-            "use_kiting": True, # Default ON for Mages
+            "use_kiting": False, # Default ON for Mages
         },
     }),
 }
@@ -256,10 +262,12 @@ class ConfigManager:
         return data
 
     # ---------- helpers ----------
-    def _profile_key(self, char_name: str, vocation: str) -> str:
+    def _profile_key(self, server_id: str, char_name: str, vocation: str) -> str:
+        s = (server_id or "default").strip()
         n = (char_name or "").strip()
         v = (vocation or "").strip().lower()
-        return f"{n}::{v}"
+        # Nueva estructura de llave: servidor::nombre::vocacion
+        return f"{s}::{n}::{v}"
 
     def _ensure_profile_schema(self, profile: dict, vocation: str) -> dict:
         """
@@ -301,41 +309,21 @@ class ConfigManager:
     def get_character(self, name: str) -> dict:
         return self.get_character_info(name)
 
-    def get_config(self, char_name: str, vocation: str) -> dict:
-        """
-        Returns profile for (char_name + vocation).
-        If missing, creates it from DEFAULTS[vocation].
-        Also migrates old profiles keyed only by char_name.
-        Also fills any missing keys (schema repair).
-        """
+    def get_config(self, server_id: str, char_name: str, vocation: str) -> dict:
         profiles = self.data.setdefault("profiles", {})
-
-        key = self._profile_key(char_name, vocation)
-        old_key = (char_name or "").strip()
-
-        # migration: old "profiles[char_name]" -> "profiles[char_name::vocation]"
-        if old_key and old_key in profiles and key not in profiles:
-            profiles[key] = profiles.pop(old_key)
-
+        key = self._profile_key(server_id, char_name, vocation)
+        
+        # Si no existe el perfil con servidor, buscamos migrar uno viejo o crear default
         if key not in profiles:
             voc = (vocation or "knight").lower()
             template = DEFAULTS.get(voc, DEFAULTS["knight"])
             profiles[key] = copy.deepcopy(template)
-
-        # schema repair (fills missing keys; no overwrite)
-        profiles[key] = self._ensure_profile_schema(profiles[key], vocation)
-
-        # persist any migration / schema fill immediately
-        self.save()
+            self.save()
+            
         return profiles[key]
 
-    def update_config(self, char_name: str, vocation: str, new_config_data: dict):
-        """
-        Saves profile for (char_name + vocation).
-        Also schema-repairs before writing.
-        """
+    def update_config(self, server_id: str, char_name: str, vocation: str, new_config_data: dict):
         profiles = self.data.setdefault("profiles", {})
-        key = self._profile_key(char_name, vocation)
-
+        key = self._profile_key(server_id, char_name, vocation)
         profiles[key] = self._ensure_profile_schema(new_config_data, vocation)
         self.save()
