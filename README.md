@@ -29,7 +29,7 @@ Core code is being migrated to `src/bot`:
 - `src/bot/actions`: input and window interaction
 - `src/bot/ui`: client picker and main GUI
 - `src/bot/utils`: shared helpers
-- `src/bot/core`: runtime orchestration (in progress)
+- `src/bot/core`: runtime orchestration (`bot_runtime.py` current runtime, `legacy_main.py` compatibility wrapper)
 
 Legacy root files are kept as compatibility wrappers during the migration.
 
