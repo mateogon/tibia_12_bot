@@ -20,6 +20,19 @@ Only OTservers supported.
 
   -Should only have one action bar.
 
+# Project Structure
+
+Core code is being migrated to `src/bot`:
+
+- `src/bot/config`: constants, config manager, static data
+- `src/bot/vision`: capture, image processing, screen elements, monster detection
+- `src/bot/actions`: input and window interaction
+- `src/bot/ui`: client picker and main GUI
+- `src/bot/utils`: shared helpers
+- `src/bot/core`: runtime orchestration (in progress)
+
+Legacy root files are kept as compatibility wrappers during the migration.
+
 # Features Status
 
 - ActionBar:

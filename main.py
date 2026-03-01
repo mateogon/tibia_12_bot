@@ -20,20 +20,20 @@ from scipy.ndimage import morphology
 from scipy.spatial import distance
 wsh= comclt.Dispatch("WScript.Shell")
 
-#LOCAL
-import data
-import image as img
-import detect_monsters as dm
-import config_manager as cm
-from constants import BotConstants
-from screen_elements import *
-from window_interaction import *
-from extras import *
-from choose_client_gui import choose_capture_window
-from main_GUI import *
+# LOCAL
+from src.bot.config import data
+from src.bot.vision import image as img
+from src.bot.vision import detect_monsters as dm
+from src.bot.config import config_manager as cm
+from src.bot.config.constants import BotConstants
+from src.bot.vision.screen_elements import *
+from src.bot.actions.window_interaction import *
+from src.bot.utils.extras import *
+from src.bot.ui.choose_client_gui import choose_capture_window
+from src.bot.ui.main_GUI import *
 from tkinter import BooleanVar,StringVar,IntVar,PhotoImage
 from functools import partial
-from bg_capture import BackgroundFrameGrabber
+from src.bot.vision.bg_capture import BackgroundFrameGrabber
 
 # endregion
 
