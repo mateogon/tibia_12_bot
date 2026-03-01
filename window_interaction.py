@@ -25,12 +25,14 @@ def revertForegroundWindow():
         win32gui.SetForegroundWindow(current_window)
 
 def click(hwnd,x, y , x_offset=-8, y_offset=-8):
+    print(f"[ACTION] trying to left-click (legacy) client=({x},{y}) offset=({x_offset},{y_offset})")
     lParam = win32api.MAKELONG(x+x_offset, y+y_offset-18)
     win32gui.PostMessage(hwnd, win32con.WM_LBUTTONDOWN,
                          win32con.MK_LBUTTON, lParam)
     win32gui.PostMessage(hwnd, win32con.WM_LBUTTONUP, None, lParam)
     
 def rclick(hwnd,x, y, x_offset=-8, y_offset=-8):
+    print(f"[ACTION] trying to right-click (legacy) client=({x},{y}) offset=({x_offset},{y_offset})")
     lParam = win32api.MAKELONG(x+x_offset, y+y_offset-18)
     win32gui.PostMessage(hwnd, win32con.WM_RBUTTONDOWN,
                          win32con.MK_RBUTTON, lParam)
@@ -49,12 +51,15 @@ def press(hwnd,*args):
         win32api.SendMessage(hwnd, win32con.WM_KEYUP, data.VK_CODE[i], 0)
 
 
-def click_client(hwnd, cx, cy):
+def click_client(hwnd, cx, cy, log_action=False):
+    if log_action:
+        print(f"[ACTION] trying to left-click client=({int(cx)},{int(cy)}) hwnd={hwnd}")
     lParam = win32api.MAKELONG(cx, cy)
     win32gui.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, lParam)
     win32gui.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, lParam)
 
 def rclick_client(hwnd, cx, cy):
+    print(f"[ACTION] trying to right-click client=({int(cx)},{int(cy)}) hwnd={hwnd}")
     lParam = win32api.MAKELONG(cx, cy)
     win32gui.PostMessage(hwnd, win32con.WM_RBUTTONDOWN, win32con.MK_RBUTTON, lParam)
     win32gui.PostMessage(hwnd, win32con.WM_RBUTTONUP, 0, lParam)
@@ -65,10 +70,15 @@ def physical_click(hwnd, client_x, client_y, right=False):
         Automatically converts Client coordinates to Global Screen coordinates
         to account for the Window Title Bar and Borders.
         """
+        print(
+            f"[ACTION] trying to {'right' if right else 'left'}-click physical "
+            f"client=({int(client_x)},{int(client_y)}) hwnd={hwnd}"
+        )
         # 1. Global Screen Conversion
         # This fixes the "clicking a bit up" issue by adding the title bar height
         point = win32gui.ClientToScreen(hwnd, (int(client_x), int(client_y)))
         screen_x, screen_y = point[0], point[1]
+        print(f"[ACTION] physical click mapped to screen=({screen_x},{screen_y})")
 
         # 2. Teleport Cursor
         win32api.SetCursorPos((screen_x, screen_y))

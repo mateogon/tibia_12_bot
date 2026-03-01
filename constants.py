@@ -34,6 +34,13 @@ class BotConstants:
     # --- 1. DEFINE TERRAIN COLORS ---
     # Obstacles (BGR)
     OBSTACLES = [[0, 51, 255], [0, 0, 0], [102, 102, 102], [0, 51, 153], [153, 102, 51]]
+
+    # Low-confidence obstacles (BGR):
+    # These colors can be walkable on some maps. They are handled with extra
+    # heuristics in collision mapping (e.g., only block small clusters).
+    LOW_CONF_OBSTACLES = [
+        [0, 102, 0],  # 006600
+    ]
     
     # Walkable (Converted from your Hex to BGR)
     WALKABLE = [

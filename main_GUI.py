@@ -288,6 +288,24 @@ class ModernBotGUI:
         self._entry_row(f_logic, "Stop when X Monsters Left:", "kill_stop_amount")
         self._entry_row(f_logic, "Kill Amount (Batch):", "kill_amount")
 
+        # 6. Hotkeys Info Section
+        f_hotkeys = self._create_section(parent, "Hotkeys")
+        ctk.CTkLabel(
+            f_hotkeys,
+            text="F11: Place next cavebot mark at mouse cursor",
+            text_color="#CFCFCF",
+        ).pack(anchor="w", padx=10, pady=(6, 2))
+        ctk.CTkLabel(
+            f_hotkeys,
+            text="F12: Place next cavebot mark at player position",
+            text_color="#CFCFCF",
+        ).pack(anchor="w", padx=10, pady=2)
+        ctk.CTkLabel(
+            f_hotkeys,
+            text="Auto cycle order: skull -> lock -> cross -> star",
+            text_color="#9FA8DA",
+        ).pack(anchor="w", padx=10, pady=(2, 8))
+
     def _build_map_tab(self, parent):
         f_ctrl = ctk.CTkFrame(parent)
         f_ctrl.pack(fill="x", padx=5, pady=5)

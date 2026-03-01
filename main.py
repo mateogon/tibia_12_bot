@@ -47,6 +47,9 @@ class Bot:
         self.config = cm.ConfigManager()
         char_info = self.config.get_character_info(self.character_name)
         self.areaspell_area = char_info["spell_area"]
+        if (self.vocation or "").lower() == "knight" and self.areaspell_area != 3:
+            print(f"[CONFIG] Knight spell_area override: {self.areaspell_area} -> 3")
+            self.areaspell_area = 3
         self.profile = self.config.get_config(self.server_id, self.character_name, self.vocation)
         
         # --- DATA MUST BE READY BEFORE GUI BUILDS ---
@@ -78,7 +81,9 @@ class Bot:
     def _setup_system(self):
         self.base_directory = os.getcwd()
         self.hwnd, self.server_id, self.character_name, self.vocation = choose_capture_window()
-        self.bg = BackgroundFrameGrabber(self.hwnd, max_fps=50)
+        # PrintWindow is expensive; cap capture rate to reduce frame-stall pressure.
+        self.bg = BackgroundFrameGrabber(self.hwnd, max_fps=25)
+        self.bg.start()
         
         if self.character_name is None:
             print("You are not logged in.")
@@ -142,9 +147,13 @@ class Bot:
         self.monster_count = 0
         self.party, self.party_positions = {}, []
         self.monster_positions = []
+        self.last_monster_detection_debug_image = None
         self.monsters_around = 0
         self.buffs = {}
         self.last_attack_time = timeInMillis()
+        self.last_attack_click_ms = 0
+        self.attack_acquire_grace_until_ms = 0
+        self.last_force_attack_request_ms = 0
         self.slot_status = [False] * 32
         self.magic_shield_enabled = False
         self.key_pressed = False
@@ -188,6 +197,7 @@ class Bot:
         self.kiting_mode = StringVar(value="forward")
         self.last_reached_mark_rel = None
         self.collision_grid = None
+        self.raw_collision_grid = None
         self.map_scale = 2  # Baseline
         self.last_scale_check = 0
         # Pick 10 random offsets within a 20px radius of map center for tracking
@@ -196,6 +206,17 @@ class Bot:
         self.stuck_counter = 0
         self.best_rune_tile = None
         self.key_debounce = False
+        self.enable_boss_sequences = False
+        self.last_walk_click_pos = None
+        self.last_walk_click_ms = 0
+        self.amp_res_stagnation_start_ms = 0
+        self.amp_res_prev_far_avg_dist = None
+        self.amp_res_prev_update_ms = 0
+        self.amp_res_last_far_count = 0
+        self.amp_res_rearmed = True
+        self.amp_res_far_anchor = None
+        self.amp_res_far_anchor_start_ms = 0
+        self.amp_res_debug = {}
     def _init_timers(self):
         self.normal_delay = getNormalDelay()
         self.delays = DelayManager(default_jitter_ms_fn=getNormalDelay)
@@ -213,6 +234,8 @@ class Bot:
         self.delays.set_default("exeta_res", 3000)
         self.delays.set_default("amp_res", 6000)
         self.delays.set_default("utito", 10000)
+        self.delays.set_default("heal_low_try", 350)
+        self.delays.set_default("heal_high_try", 450)
         self.delays.set_default("centering", 250) # Only recenter every 1.5s
         self.delays.set_default("kiting", 600) # El mago reacciona más rápido (0.8s) que el caballero
 
@@ -289,9 +312,14 @@ class Bot:
         cv2.waitKey(1)
         
     def updateFrame(self):
-        ok = self.bg.update()
-        if ok and self.bg.frame_bgr is not None:
+        # Non-blocking: consume latest frame produced by background capture thread.
+        if self.bg.frame_bgr is not None:
             img.set_cached_frame(self.hwnd, self.bg.frame_bgr)
+        else:
+            # Startup fallback (first frame) in case thread has not produced one yet.
+            ok = self.bg.update(force=True)
+            if ok and self.bg.frame_bgr is not None:
+                img.set_cached_frame(self.hwnd, self.bg.frame_bgr)
 
     def updateWindowCoordinates(self):
         maximizeWindow(self.hwnd)
@@ -471,18 +499,20 @@ class Bot:
         y = self.s_ActionBar.region[1]
         x = self.s_ActionBar.region[0]+(box_width*(pos))+2*pos
         return (x,y)
-    
+
     def clickActionbarSlot(self, pos, check_cooldown=True):
         # 1. Defensive Cooldown Check
         if check_cooldown:
             # We use the optimized NumPy check we just wrote
             if not self.checkActionBarSlotCooldown(pos):
-                # print(f"[DEBUG] Slot {pos} is on cooldown. Skipping click.")
                 return False
 
         # 2. Perform the click
         x, y = self.getActionbarSlotPosition(pos)
-        click_client(self.hwnd, x, y)
+        # Click the center of the slot, not the top-left sample pixel.
+        click_x = x + 17
+        click_y = y + 17
+        click_client(self.hwnd, click_x, click_y, log_action=False)
         return True
     
     def updateActionbarSlotStatus(self):
@@ -899,11 +929,16 @@ class Bot:
         if (self.hppc <= self.hp_thresh_low.get() or burst > 40):
             # Check if slot exists in config
             if "heal_low" in self.slots: 
-                self.clickActionbarSlot(self.slots["heal_low"])
+                # Aggressive retry cadence for emergency heals.
+                # We intentionally bypass slot-text cooldown detection here.
+                if self.delays.allow("heal_low_try"):
+                    self.clickActionbarSlot(self.slots["heal_low"], check_cooldown=False)
                 
         elif self.hppc < self.hp_thresh_high.get():
             if "heal_high" in self.slots:
-                self.clickActionbarSlot(self.slots["heal_high"])
+                # Slightly slower than low-heal, still faster/more responsive.
+                if self.delays.allow("heal_high_try"):
+                    self.clickActionbarSlot(self.slots["heal_high"], check_cooldown=False)
             
     def manageMana(self):
         self.getMana()
@@ -924,13 +959,174 @@ class Bot:
             if self.clickActionbarSlot(slot):
                 self.delays.trigger("exeta_res")
 
-    def castAmpRes(self):
+    def castAmpRes(self, allow_rearm=False):
         if not self.delays.due("amp_res"):
-            return
+            if not allow_rearm:
+                return
+            last_amp_ms = self.delays.last_ms("amp_res", default=0) or 0
+            # Early recast path only when explicitly allowed by smarter logic.
+            if (timeInMillis() - last_amp_ms) < 2500:
+                return
         slot = self.slots.get("amp_res")
         if slot is not None:
             if self.clickActionbarSlot(slot):
                 self.delays.trigger("amp_res")
+                self.amp_res_rearmed = False
+
+    def _count_free_melee_tiles(self):
+        """
+        Counts immediately adjacent walkable tiles around player on 15x11 local grid.
+        """
+        base_grid = self.raw_collision_grid if self.raw_collision_grid is not None else self.collision_grid
+        if base_grid is None:
+            return 0
+        p_row, p_col = 5, 7
+
+        # Mark tiles currently occupied by detected monsters.
+        occupied = set()
+        tile_w = self.s_GameScreen.tile_w
+        tile_h = self.s_GameScreen.tile_h
+        for mx, my in self.monster_positions:
+            m_col = int(mx // tile_w)
+            m_row = int(my // tile_h)
+            if 0 <= m_row < 11 and 0 <= m_col < 15:
+                occupied.add((m_row, m_col))
+
+        free = 0
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dx == 0 and dy == 0:
+                    continue
+                r = p_row + dy
+                c = p_col + dx
+                if (
+                    0 <= r < 11
+                    and 0 <= c < 15
+                    and base_grid[r, c] == 0
+                    and (r, c) not in occupied
+                ):
+                    free += 1
+        return free
+
+    def _should_cast_amp_res(self):
+        """
+        Smart Amp Res decision:
+        - Need at least one distant monster (>=2 tiles).
+        - Need at least one free adjacent tile around player.
+        - A distant monster must stay roughly in the same place for ~1s.
+        - Respect cooldown, with optional rearm path after far mobs clear/reappear.
+        """
+        now_ms = timeInMillis()
+
+        if not self.monster_positions:
+            self.amp_res_stagnation_start_ms = 0
+            self.amp_res_prev_far_avg_dist = None
+            self.amp_res_prev_update_ms = 0
+            self.amp_res_last_far_count = 0
+            self.amp_res_rearmed = True
+            self.amp_res_far_anchor = None
+            self.amp_res_far_anchor_start_ms = 0
+            self.amp_res_debug = {"reason": "no_monsters"}
+            return False
+
+        tile = self.s_GameScreen.tile_h
+        center = self.s_GameScreen.getRelativeCenter()
+
+        # Ranged/away monsters: outside >=2.0 tiles from player center
+        far_dist_threshold = tile * 2.0
+        far_positions = []
+        far_distances = []
+        for mx, my in self.monster_positions:
+            d = sqrt((mx - center[0]) ** 2 + (my - center[1]) ** 2)
+            if d > far_dist_threshold:
+                far_positions.append((mx, my))
+                far_distances.append(d)
+
+        far_count = len(far_distances)
+        free_melee_tiles = self._count_free_melee_tiles()
+
+        # If far monsters disappear, rearm early recast path.
+        if far_count == 0:
+            self.amp_res_rearmed = True
+            self.amp_res_stagnation_start_ms = 0
+            self.amp_res_prev_far_avg_dist = None
+            self.amp_res_prev_update_ms = now_ms
+            self.amp_res_last_far_count = 0
+            self.amp_res_far_anchor = None
+            self.amp_res_far_anchor_start_ms = 0
+            self.amp_res_debug = {
+                "reason": "no_far_monsters",
+                "free_melee_tiles": free_melee_tiles,
+            }
+            return False
+
+        # Need room around player so pulled monsters can stack in melee ring.
+        if free_melee_tiles < 1:
+            self.amp_res_stagnation_start_ms = 0
+            self.amp_res_prev_far_avg_dist = float(np.mean(far_distances))
+            self.amp_res_prev_update_ms = now_ms
+            self.amp_res_last_far_count = far_count
+            self.amp_res_far_anchor = None
+            self.amp_res_far_anchor_start_ms = 0
+            self.amp_res_debug = {
+                "reason": "no_free_melee_tiles",
+                "far_count": far_count,
+                "free_melee_tiles": free_melee_tiles,
+            }
+            return False
+
+        # Track one "anchor" far monster without identities:
+        # If nearest far monster to previous anchor stays near same spot, accumulate stable time.
+        anchor_match_radius = tile * 0.55
+        anchor_stability_radius = tile * 0.28
+
+        if self.amp_res_far_anchor is None:
+            self.amp_res_far_anchor = far_positions[0]
+            self.amp_res_far_anchor_start_ms = now_ms
+        else:
+            ax, ay = self.amp_res_far_anchor
+            nearest = min(
+                far_positions,
+                key=lambda p: (p[0] - ax) ** 2 + (p[1] - ay) ** 2
+            )
+            nearest_dist = sqrt((nearest[0] - ax) ** 2 + (nearest[1] - ay) ** 2)
+
+            if nearest_dist <= anchor_match_radius:
+                # Same likely target still around. Update anchor gently.
+                # If it drifted a lot, reset stability timer.
+                if nearest_dist > anchor_stability_radius:
+                    self.amp_res_far_anchor_start_ms = now_ms
+                self.amp_res_far_anchor = nearest
+            else:
+                # Previous far target likely gone/replaced -> restart stability timer.
+                self.amp_res_far_anchor = nearest
+                self.amp_res_far_anchor_start_ms = now_ms
+
+        stable_ms = max(0, now_ms - self.amp_res_far_anchor_start_ms)
+
+        # Standard cooldown OR early-rearm path (only after far pack cleared once)
+        last_amp_ms = self.delays.last_ms("amp_res", default=0) or 0
+        since_last_amp_ms = now_ms - last_amp_ms if last_amp_ms else 10**9
+        due_regular = self.delays.due("amp_res")
+        due_rearm = self.amp_res_rearmed and since_last_amp_ms >= 2500
+
+        should_cast = stable_ms >= 1000 and (due_regular or due_rearm)
+
+        far_avg = float(np.mean(far_distances))
+        self.amp_res_prev_far_avg_dist = far_avg
+        self.amp_res_prev_update_ms = now_ms
+        self.amp_res_last_far_count = far_count
+        self.amp_res_debug = {
+            "reason": "ready" if should_cast else "tracking",
+            "far_count": far_count,
+            "far_avg": int(far_avg),
+            "free_melee_tiles": free_melee_tiles,
+            "stagnant_ms": int(stable_ms),
+            "due_regular": due_regular,
+            "due_rearm": due_rearm,
+        }
+
+        return should_cast
 
     def haste(self):
         slot = self.slots.get("haste")
@@ -1110,10 +1306,32 @@ class Bot:
         # 1. Checks: Don't attack if in PZ
         if self.buffs.get('pz', False):
             return
-            
+
+        # Nothing to do if battle list is empty.
+        # `self.monster_count` is refreshed in the main loop every frame.
+        if getattr(self, "monster_count", 0) <= 0:
+            return
+
+        now_ms = timeInMillis()
+
+        # After sending an attack click, give the client a short window to show attack state
+        # before issuing another target click (prevents oscillation/spam).
+        if now_ms < self.attack_acquire_grace_until_ms:
+            if self.isAttacking():
+                self.attack_acquire_grace_until_ms = 0
+            else:
+                return
+
         # Only check delay if we are NOT forcing the attack
         if not force:
             if self.isAttacking() or not self.delays.due("attack_click"):
+                return
+        else:
+            # Even forced reacquire should respect a tiny hard floor between clicks.
+            if (now_ms - self.last_attack_click_ms) < 220:
+                return
+            # Also throttle force requests globally to avoid oscillation spam.
+            if (now_ms - self.last_force_attack_request_ms) < 320:
                 return
 
         # 2. Capture and Scan (Rest of your existing logic...)
@@ -1122,7 +1340,22 @@ class Bot:
         if image is None: return
 
         height, width, _ = image.shape
-        rel_x, start_y, step_y = 25, 30, 22
+        # Keep these aligned with monsterCount() scanline constants.
+        rel_x, start_y, step_y = 25, 31, 22
+
+        # Knights should prioritize the first battle-list row (closest target).
+        if (self.vocation or "").lower() == "knight":
+            if start_y < height and rel_x < width:
+                first_pixel = image[start_y, rel_x]
+                if first_pixel[0] == 0 and first_pixel[1] == 0 and first_pixel[2] == 0:
+                    abs_x, abs_y = region[0] + rel_x, region[1] + start_y
+                    click_client(self.hwnd, abs_x, abs_y)
+                    self.delays.trigger("attack_click")
+                    self.last_attack_click_ms = now_ms
+                    self.attack_acquire_grace_until_ms = now_ms + 300
+                    if force:
+                        self.last_force_attack_request_ms = now_ms
+                    return
 
         for rel_y in range(start_y, height, step_y):
             if rel_y >= height or rel_x >= width: break
@@ -1132,6 +1365,10 @@ class Bot:
                 abs_x, abs_y = region[0] + rel_x, region[1] + rel_y
                 click_client(self.hwnd, abs_x, abs_y)
                 self.delays.trigger("attack_click")
+                self.last_attack_click_ms = now_ms
+                self.attack_acquire_grace_until_ms = now_ms + 300
+                if force:
+                    self.last_force_attack_request_ms = now_ms
                 return
             
 
@@ -1220,10 +1457,11 @@ class Bot:
         
         if image is None:
             self.monster_positions = []
+            self.last_monster_detection_debug_image = None
             return
 
-        # 2. Run the detection (Returns feet coordinates)
-        raw_positions = dm.detect_monsters(image)
+        # 2. Run the detection (Returns feet coordinates + debug image)
+        raw_positions, debug_image = dm.detect_monsters(image, return_debug=True)
         
         monster_positions = []
         
@@ -1244,6 +1482,7 @@ class Bot:
                     if test:
                         # Draw BLUE for Party
                         cv2.circle(image, (mx, my), 5, (255, 0, 0), -1)
+                    cv2.circle(debug_image, (mx, my), 6, (255, 0, 0), 2)
                     break
             
             if not is_party:
@@ -1251,12 +1490,21 @@ class Bot:
                 if test:
                     # Draw GREEN for Monsters
                     cv2.circle(image, (mx, my), 5, (0, 255, 0), -1)
+                cv2.circle(debug_image, (mx, my), 6, (0, 255, 0), 2)
+        
+        # Optional: visualize party positions used for filtering
+        for player in self.party_positions:
+            px, py = player[0]
+            cv2.circle(debug_image, (int(px), int(py)), 4, (255, 0, 255), -1)
 
         self.monster_positions = monster_positions
+        self.last_monster_detection_debug_image = debug_image
         
         if test:
             # Show the live debug window
             img.visualize_fast(image)
+        
+        return debug_image
 
     def get_training_positions(self):
         """
@@ -1505,19 +1753,18 @@ class Bot:
         self.monsters_around = self.getMonstersAround(self.areaspell_area, True, True)
         self.monster_count = self.monsterCount()
 
+        # --- Exeta Res ---
         if self.monsters_around > 0:
-            # --- Exeta Res ---
             if self._bool_value(self.res): # Usamos _bool_value para estar seguros
                 if "exeta" in self.slots:
                     self.castExetaRes()
 
-            # --- Amp Res ---
-            if self._bool_value(self.amp_res):
-                monsters_in_melee = self.getMonstersAround(3, False, False)
-                # Si hay más monstruos en pantalla que en cuerpo a cuerpo, traerlos
-                if monsters_in_melee < self.monster_count:
-                    if "amp_res" in self.slots:
-                        self.castAmpRes()
+        # --- Amp Res ---
+        # Evaluate against full detected monster positions, not only close-range count.
+        if self.monster_count > 0:
+            if self._bool_value(self.amp_res) and "amp_res" in self.slots:
+                if self._should_cast_amp_res():
+                    self.castAmpRes(allow_rearm=True)
 
     def attackAreaSpells(self):
         """
@@ -1651,6 +1898,23 @@ class Bot:
         x, y = self.getActionbarSlotPosition(pos)
         region = (x, y, x + 34, y + 34)
         return img.screengrab_array(self.hwnd, region)
+
+    def click_walk_target(self, x, y, min_interval_ms=450, min_delta_px=4):
+        """
+        Debounced movement click for minimap/pathing targets.
+        Prevents spamming nearly identical walk clicks every frame.
+        """
+        now = timeInMillis()
+        if self.last_walk_click_pos is not None:
+            lx, ly = self.last_walk_click_pos
+            dist = sqrt((x - lx) ** 2 + (y - ly) ** 2)
+            if dist < min_delta_px and (now - self.last_walk_click_ms) < min_interval_ms:
+                return False
+
+        click_client(self.hwnd, int(x), int(y))
+        self.last_walk_click_pos = (int(x), int(y))
+        self.last_walk_click_ms = now
+        return True
     
     def manageEquipment(self):
         if not self.delays.allow("equip_cycle"):
@@ -1920,7 +2184,7 @@ class Bot:
                 if self.current_mark == "skull":
                     print("[STATIC LURE] Regreso exitoso. Tanqueando...")
                     self.lure_trip_active = False
-                    self.clickStop()
+                    self.clickStop(reason="static_lure_reached_skull")
                 else:
                     print(f"[STATIC LURE] Marca {self.current_mark} alcanzada. Siguiente...")
                     self.nextMark()
@@ -1928,7 +2192,7 @@ class Bot:
 
             # Ejecutar caminata
             if self.delays.allow("walk", base_ms=200):
-                click_client(self.hwnd, abs_pos[0], abs_pos[1])
+                self.click_walk_target(abs_pos[0], abs_pos[1], min_interval_ms=450, min_delta_px=5)
 
     def cavebottest(self):
         # 1. Update basic state for this frame
@@ -1942,7 +2206,7 @@ class Bot:
                 print(f"[CAVEBOT] Switching to KITING. Monsters: {self.monster_count}")
                 self.kill = True
                 self.kill_start_time = time.time()
-                self.clickStop()
+                self.clickStop(reason="cavebot_enter_kill_mode")
         else:
             if self.monster_count <= self.kill_stop_amount.get() or kill_time > self.kill_stop_time:
                 print(f"[CAVEBOT] Switching to LURING/WALKING.")
@@ -1985,7 +2249,7 @@ class Bot:
 
                 # --- ADVANCE TO NEXT MARK ---
                 print(f"[CAVEBOT] Node {self.current_mark} reached ({int(dist)}px). Advancing.")
-                self.clickStop()
+                self.clickStop(reason="cavebot_node_reached")
                 self.nextMark()
                 
                 # REFRESH: Get the NEW mark data immediately so kiting/walking 
@@ -2024,14 +2288,14 @@ class Bot:
         if self.use_lure_walk.get() and self.monster_count > 0:
             self.executeLureWalk(abs_pos)
         elif self.delays.allow("walk", base_ms=250):
-            click_client(self.hwnd, abs_pos[0], abs_pos[1])
+            self.click_walk_target(abs_pos[0], abs_pos[1], min_interval_ms=500, min_delta_px=5)
     
     
     def executeLureWalk(self, mark_pos):
         # If the setting is off or no monsters, walk normally
         if not self.use_lure_walk.get() or self.monster_count == 0:
             if self.delays.allow("walk", base_ms=200):
-                click_client(self.hwnd, mark_pos[0], mark_pos[1])
+                self.click_walk_target(mark_pos[0], mark_pos[1], min_interval_ms=450, min_delta_px=5)
             return
 
         now = time.time()
@@ -2044,11 +2308,11 @@ class Bot:
                 was_attacking = self.isAttacking()
                 
                 # 2. Stop movement (and unfortunately, attack)
-                self.clickStop()
+                self.clickStop(reason="lure_stutter_stop_phase")
                 
                 # 3. If we were attacking, resume IMMEDIATELY
                 if was_attacking:
-                    self.clickAttack(force=True)
+                    self.request_attack_reacquire(source="lure_stutter")
                 # ---------------
 
                 self.lure_phase = "stopping"
@@ -2056,13 +2320,13 @@ class Bot:
             else:
                 # Maintain direction while walking
                 if self.delays.allow("walk", base_ms=250):
-                    click_client(self.hwnd, mark_pos[0], mark_pos[1])
+                    self.click_walk_target(mark_pos[0], mark_pos[1], min_interval_ms=500, min_delta_px=5)
 
         elif self.lure_phase == "stopping":
             if elapsed_ms >= self.lure_stop_ms.get():
                 self.lure_phase = "walking"
                 self.last_lure_action_time = now
-                click_client(self.hwnd, mark_pos[0], mark_pos[1])
+                self.click_walk_target(mark_pos[0], mark_pos[1], min_interval_ms=350, min_delta_px=4)
 
     def recenter_on_pack(self):
         """Aggressive recentering to maximize AoE spell coverage."""
@@ -2113,8 +2377,8 @@ class Bot:
         # Use physical_click to ensure the movement is registered during high-action combat
         click_client(self.hwnd, abs_cx, abs_cy)
         
-        # Immediate Attack Resume
-        self.GUI.root.after(30, lambda: self.clickAttack(force=True))
+        # Immediate Attack Resume (throttled)
+        self.request_attack_reacquire(source="recenter")
         self.delays.trigger("centering")
 
     def is_actually_moving(self, map_img):
@@ -2265,7 +2529,7 @@ class Bot:
             dynamic_delay = 600 + (d_dist - 1) * 150
             self.delays.trigger("kiting", base_ms=dynamic_delay)
             
-            self.GUI.root.after(30, lambda: self.clickAttack(force=True))
+            self.request_attack_reacquire(source="kiting")
 
     def reset_marks_history(self):
         """Manually clears the 'visited' status of map marks."""
@@ -2276,9 +2540,26 @@ class Bot:
         self.current_mark_index = 0
         self.current_mark = self.mark_list[0]
            
-    def clickStop(self):
+    def request_attack_reacquire(self, source="unknown"):
+        """
+        Schedules a throttled forced attack reacquire.
+        Avoids spam from multiple movement systems requesting it in the same second.
+        """
+        now_ms = timeInMillis()
+        if self.isAttacking():
+            return
+        if (now_ms - self.last_force_attack_request_ms) < 320:
+            return
+        self.last_force_attack_request_ms = now_ms
+        self.GUI.root.after(50, lambda: self.clickAttack(force=True))
+
+    def clickStop(self, reason="generic"):
         region = self.s_Stop.getCenter()
+        print(f"[ACTION] trying to click STOP reason={reason} at client=({region[0]},{region[1]})")
         click_client(self.hwnd,region[0],region[1])
+
+    def getMonsterDetectionDebugImage(self):
+        return self.last_monster_detection_debug_image
 
     def getCenterMarkImage(self):
         map_center = self.s_Map.center
@@ -2706,12 +2987,10 @@ class Bot:
 
         elif kb.is_pressed('+'):
             if not self.key_debounce:
-                self.execute_boss_hotkey() # Activa secuencia 'enter'
                 self.key_debounce = True
 
         if kb.is_pressed('-'):
             if not self.key_debounce:
-                self.execute_exit_boss_sequence() # Activa secuencia 'exit'
                 self.key_debounce = True
         else:
             self.key_debounce = False # Reset debounce when key is released
@@ -2799,12 +3078,16 @@ class Bot:
 
     def execute_boss_hotkey(self):
         """Trigger inicial para ENTRADA"""
+        if not self.enable_boss_sequences:
+            return
         delay = self.get_vocation_delay()
         print(f"[SEQUENCE] {self.vocation} espera {delay}s...")
         self.GUI.root.after(int(delay * 1000), lambda: self._set_active_sequence("enter"))
 
     def execute_exit_boss_sequence(self):
         """Trigger inicial para SALIDA"""
+        if not self.enable_boss_sequences:
+            return
         delay = self.get_vocation_delay()
         print(f"[SEQUENCE] {self.vocation} espera {delay}s...")
         self.GUI.root.after(int(delay * 1000), lambda: self._set_active_sequence("exit"))
@@ -2814,6 +3097,8 @@ class Bot:
 
     def manage_boss_sequences(self):
         """Ejecuta el flujo completo de entrada o salida de forma automática."""
+        if not self.enable_boss_sequences:
+            return
         if not self.active_sequence:
             return
 
@@ -2995,6 +3280,7 @@ class Bot:
         
         # 1. Prepare Obstacle Data (The Blacklist)
         OBS = np.array(BotConstants.OBSTACLES, dtype=np.uint8)
+        LOW_CONF_OBS = np.array(getattr(BotConstants, "LOW_CONF_OBSTACLES", []), dtype=np.uint8)
         
         # 2. Vectorized Color Sampling
         local_data = np.zeros((11, 15, 3), dtype=np.uint8)
@@ -3007,9 +3293,11 @@ class Bot:
                     # Boundaries/Outside map treated as walls
                     local_data[r, c] = [0, 0, 0] 
 
-        # 3. Terrain Check: "Blacklist" approach
-        # Marks are NOT in the obstacle list, so they will stay False (Walkable)
+        # 3. Terrain Check:
+        # - Strong obstacles: always blocked.
+        # - Low-confidence obstacles: blocked only when part of small clusters (1-3 tiles).
         is_obstacle = np.zeros((11, 15), dtype=bool)
+        is_low_conf = np.zeros((11, 15), dtype=bool)
         for r in range(11):
             for c in range(15):
                 color = local_data[r, c]
@@ -3017,13 +3305,42 @@ class Bot:
                 if np.any(np.all(color == OBS, axis=-1)):
                     is_obstacle[r, c] = True
                 else:
-                    # EVERYTHING ELSE (Marks, UI, Grass, Water, New terrain) is Walkable
                     is_obstacle[r, c] = False
+                if LOW_CONF_OBS.size > 0 and np.any(np.all(color == LOW_CONF_OBS, axis=-1)):
+                    is_low_conf[r, c] = True
+
+        # Low-confidence cluster heuristic:
+        # Treat as blocked only if connected cluster size is small (<=3 tiles).
+        visited = np.zeros((11, 15), dtype=bool)
+        dirs = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+        for r in range(11):
+            for c in range(15):
+                if not is_low_conf[r, c] or visited[r, c]:
+                    continue
+
+                stack = [(r, c)]
+                comp = []
+                visited[r, c] = True
+
+                while stack:
+                    cr, cc = stack.pop()
+                    comp.append((cr, cc))
+                    for dr, dc in dirs:
+                        nr, nc = cr + dr, cc + dc
+                        if 0 <= nr < 11 and 0 <= nc < 15 and not visited[nr, nc] and is_low_conf[nr, nc]:
+                            visited[nr, nc] = True
+                            stack.append((nr, nc))
+
+                if len(comp) <= 3:
+                    for cr, cc in comp:
+                        is_obstacle[cr, cc] = True
 
         # 4. Initialize Grid
         grid = np.zeros((11, 15), dtype=int)
         grid[is_obstacle] = 1
         grid[5, 7] = 3 # Player tile constant
+        # Keep pre-interpolation/raw obstacle view for strict nearby-space checks.
+        self.raw_collision_grid = grid.copy()
 
         # 5. Apply 3-Point Connectivity interpolation (Preserved)
         # We KEEP this because it connects detected obstacles to form solid walls
@@ -3128,6 +3445,21 @@ class Bot:
             # DEBUG TEXT
             cv2.putText(vis, f"ZOOM: {self.map_scale}x", (10, 30), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            if self.vocation == "knight" and hasattr(self, "amp_res_debug") and self.amp_res_debug:
+                dbg = self.amp_res_debug
+                reason = str(dbg.get("reason", "n/a"))
+                far_count = dbg.get("far_count", 0)
+                free_tiles = dbg.get("free_melee_tiles", 0)
+                stagnant_ms = dbg.get("stagnant_ms", 0)
+                cv2.putText(
+                    vis,
+                    f"AMP RES | reason={reason} far={far_count} free={free_tiles} stagnant={stagnant_ms}ms",
+                    (10, 52),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (0, 200, 255),
+                    1
+                )
             
             cv2.addWeighted(overlay, 0.4, vis, 0.6, 0, vis)
             cv2.imshow("AI Spatial Vision", vis)
@@ -3353,27 +3685,46 @@ if __name__ == "__main__":
     bot.updateAllElements()
     bot.updateActionbarSlotStatus()
     
-    def on_key_event(e):
-        bot.key_pressed = e.name # Stores strings like 'f11', 'page up'
-
-    kb.on_press(on_key_event)
     count = 0
     total_time = 0
     times = [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
     start_time = time.time()
+    perf_last_t = time.perf_counter()
+    perf_last_count = 0
+    perf_last_bg_seq = -1
+    perf_samples = 0
+    perf_totals_ms = {}
+    last_slot_status_second = -1
+
+    def _perf_add(name, t0):
+        dt_ms = (time.perf_counter() - t0) * 1000.0
+        perf_totals_ms[name] = perf_totals_ms.get(name, 0.0) + dt_ms
+
     while(True): 
+        frame_t0 = time.perf_counter()
         # Check if GUI signaled exit
         if not bot.loop.get():
             break
-            
-        bot.GUI.loop()
+        
+        t0 = time.perf_counter(); bot.GUI.loop(); _perf_add("gui_loop", t0)
+        t0 = time.perf_counter()
         bot.updateFrame()
-        bot.updateWindowCoordinates()
-        bot.manageKeysSync()
-        bot.checkAndDetectElements()
-        bot.getBuffs()
-
-        bot.manage_boss_sequences()
+        _perf_add("update_frame", t0)
+        bg_seq = getattr(bot.bg, "metrics_seq", -1)
+        if bg_seq != perf_last_bg_seq:
+            perf_last_bg_seq = bg_seq
+            bgm = getattr(bot.bg, "last_metrics", None)
+            if bgm:
+                perf_totals_ms["bg_capture"] = perf_totals_ms.get("bg_capture", 0.0) + float(bgm.get("capture_ms", 0.0))
+                perf_totals_ms["bg_crop_convert"] = perf_totals_ms.get("bg_crop_convert", 0.0) + float(bgm.get("crop_convert_ms", 0.0))
+                if bgm.get("throttled", False):
+                    perf_totals_ms["bg_throttled_frames"] = perf_totals_ms.get("bg_throttled_frames", 0.0) + 1.0
+        t0 = time.perf_counter(); bot.updateWindowCoordinates(); _perf_add("window_coords", t0)
+        t0 = time.perf_counter(); bot.manageKeysSync(); _perf_add("keys_sync", t0)
+        t0 = time.perf_counter(); bot.checkAndDetectElements(); _perf_add("detect_elements", t0)
+        if count % 2 == 0:
+            t0 = time.perf_counter(); bot.getBuffs(); _perf_add("buff_scan", t0)
+        t0 = time.perf_counter(); bot.manage_boss_sequences(); _perf_add("boss_seq", t0)
 
         start = timeInMillis()
         start_loop = time.perf_counter()
@@ -3382,84 +3733,132 @@ if __name__ == "__main__":
 
 
         #print(current_time % 10)
-        if current_time % 10 == 0:
-            bot.updateActionbarSlotStatus()
+        if current_time % 10 == 0 and current_time != last_slot_status_second:
+            last_slot_status_second = current_time
+            t0 = time.perf_counter(); bot.updateActionbarSlotStatus(); _perf_add("slot_status_update", t0)
             #print("looting")
             if bot.loot_on_spot.get():
-                bot.lootAround(True)
+                t0 = time.perf_counter(); bot.lootAround(True); _perf_add("loot_on_spot", t0)
 
 
         # 1. Periodic Scale Detection (Every ~2 seconds)
         if count % 30 == 0:
+            t0 = time.perf_counter()
             map_img = img.screengrab_array(bot.hwnd, bot.s_Map.region)
             bot.map_scale = bot.detect_minimap_scale(map_img)
+            _perf_add("scale_detect", t0)
 
         # 2. Update Basic States (Monsters, Buffs, etc)
-        bot.monster_count = bot.monsterCount() 
+        t0 = time.perf_counter(); bot.monster_count = bot.monsterCount(); _perf_add("monster_count", t0)
         if bot.monster_count > 0:
+            t0 = time.perf_counter()
             bot.updateMonsterPositions()
             bot.monster_positions = bot.get_filtered_monsters()
+            _perf_add("monster_positions", t0)
 
         # 3. GENERATE COLLISION GRID (Calculated once per frame)
         # This grid is now stored in bot.collision_grid and shared with all methods
-        bot.collision_grid, _ = bot.get_local_collision_map()
+        # Collision map is only needed by movement/rune/amp-res logic.
+        need_collision = (
+            bot.cavebot.get()
+            or bot.use_area_rune.get()
+            or bot.use_recenter.get()
+            or bot.use_kiting.get()
+            or bot._bool_value(bot.amp_res)
+        )
+        if need_collision:
+            # Refresh more frequently in combat/movement, less while idle.
+            cadence = 1 if bot.monster_count > 0 else 2
+            if (count % cadence == 0) or (bot.collision_grid is None):
+                t0 = time.perf_counter(); bot.collision_grid, _ = bot.get_local_collision_map(); _perf_add("collision_map", t0)
 
         # 4. Logic methods can now simply read bot.collision_grid
         if bot.attack.get():
-            bot.clickAttack()
+            t0 = time.perf_counter(); bot.clickAttack(); _perf_add("attack_click", t0)
 
         if bot.cavebot.get():
             if bot.use_static_lure.get():
-                bot.execute_static_party_lure()
+                t0 = time.perf_counter(); bot.execute_static_party_lure(); _perf_add("cavebot_static_lure", t0)
             else:
-                bot.cavebottest() # Cavebot normal para luring convencional
+                t0 = time.perf_counter(); bot.cavebottest(); _perf_add("cavebot_main", t0) # Cavebot normal para luring convencional
 
 
 
         if bot.hp_heal.get():
-            bot.manageHealth()
-            bot.manageMagicShield()
+            t0 = time.perf_counter(); bot.manageHealth(); _perf_add("heal_hp", t0)
+            t0 = time.perf_counter(); bot.manageMagicShield(); _perf_add("magic_shield", t0)
         if bot.mp_heal.get():
-            bot.manageMana()
+            t0 = time.perf_counter(); bot.manageMana(); _perf_add("heal_mp", t0)
 
-        bot.manageKnightSupport()
+        t0 = time.perf_counter(); bot.manageKnightSupport(); _perf_add("knight_support", t0)
 
        # Combat chain
         if bot.attack_spells.get():
-            did_aoe = bot.attackAreaSpells()
+            t0 = time.perf_counter(); did_aoe = bot.attackAreaSpells(); _perf_add("spells_area", t0)
             did_rune = False
             if not did_aoe and bot.use_area_rune.get():
-                did_rune = bot.useAreaRune()
+                t0 = time.perf_counter(); did_rune = bot.useAreaRune(); _perf_add("spells_area_rune", t0)
             if not did_aoe and not did_rune:
-                bot.attackTargetSpells()
+                t0 = time.perf_counter(); bot.attackTargetSpells(); _perf_add("spells_target", t0)
 
 
         if bot._bool_value(bot.use_haste):
-            bot.haste()
+            t0 = time.perf_counter(); bot.haste(); _perf_add("haste", t0)
         if bot._bool_value(bot.use_food):
-            bot.eat()
+            t0 = time.perf_counter(); bot.eat(); _perf_add("food", t0)
         if bot.manage_equipment.get():
-            bot.manageEquipment()
+            t0 = time.perf_counter(); bot.manageEquipment(); _perf_add("equipment", t0)
         #if bot.follow_party.get():
         if bot.character_name != bot.party_leader.get() and bot.follow_party.get():
-            bot.manageFollow()
+            t0 = time.perf_counter(); bot.manageFollow(); _perf_add("follow_party", t0)
             if count%300 == 0:
                 #print("updating party list")
-                bot.getPartyList()
+                t0 = time.perf_counter(); bot.getPartyList(); _perf_add("party_scan", t0)
 
         if bot.use_area_rune.get() and bot.vocation != "knight":
             #if bot.monsterCount() > 0:
             #if bot.vocation == "paladin":
                 #bot.useAreaAmmo()
             #else:
-            bot.useAreaRune()
+            t0 = time.perf_counter(); bot.useAreaRune(); _perf_add("extra_area_rune", t0)
         if len(bot.party.keys()) > 0:
-            bot.healParty()
+            t0 = time.perf_counter(); bot.healParty(); _perf_add("heal_party", t0)
 
         # 5. Visualization (Throttled for performance)
-        #if count % 3 == 0:
-        #    bot.visualize_monster_grid(bot.collision_grid, bot.map_scale)
+        if bot._bool_value(bot.show_area_rune_target) and count % 3 == 0:
+            t0 = time.perf_counter(); bot.visualize_monster_grid(bot.collision_grid, bot.map_scale); _perf_add("visualize", t0)
 
         
         count+=1
+        perf_samples += 1
+        _perf_add("frame_total", frame_t0)
+        now_perf = time.perf_counter()
+        dt = now_perf - perf_last_t
+        if dt >= 1.0:
+            cps = (count - perf_last_count) / dt
+            avg_frame_ms = perf_totals_ms.get("frame_total", 0.0) / max(perf_samples, 1)
+            print(f"[PERF] cycles/s={cps:.1f} avg_frame_ms={avg_frame_ms:.2f}")
 
+            total_ms_window = perf_totals_ms.get("frame_total", 0.0)
+            ranked = []
+            for k, v in perf_totals_ms.items():
+                if k == "frame_total" or k == "bg_throttled_frames":
+                    continue
+                avg_ms = v / max(perf_samples, 1)
+                share = (v / total_ms_window * 100.0) if total_ms_window > 0 else 0.0
+                ranked.append((v, k, avg_ms, share))
+            ranked.sort(reverse=True)
+            top = ranked[:8]
+            if top:
+                top_line = " | ".join([f"{k}:{avg_ms:.2f}ms({share:.0f}%)" for _, k, avg_ms, share in top])
+                print(f"[PERF] top: {top_line}")
+            if "bg_throttled_frames" in perf_totals_ms:
+                thr = perf_totals_ms["bg_throttled_frames"]
+                print(f"[PERF] bg_throttled={int(thr)}/{perf_samples}")
+
+            perf_last_t = now_perf
+            perf_last_count = count
+            perf_samples = 0
+            perf_totals_ms = {}
+
+    bot.bg.stop()
