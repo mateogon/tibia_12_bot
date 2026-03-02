@@ -463,6 +463,10 @@ class ScreenWindow(ScreenElement):
             self.detected = False
             return False
         else:
+            min_height = 0
+            if self.name == "BattleList":
+                # Guard against false-positive "end" anchors too close to the title bar.
+                min_height = 80
             closest = None
             if (len(window_bottom) > 1):
                 dist = 99999
@@ -470,11 +474,25 @@ class ScreenWindow(ScreenElement):
                     y_dif = end[1]-window_top[1]
                     if (y_dif < 0):
                         continue
+                    if (y_dif < min_height):
+                        continue
                     if (y_dif < dist):
                         dist = y_dif
                         closest = end
             else:
-                closest = window_bottom[0]
+                only = window_bottom[0]
+                y_dif = only[1] - window_top[1]
+                if y_dif >= min_height:
+                    closest = only
+            if closest is None and len(window_bottom) > 0:
+                # Fallback: choose the farthest valid end so region is never a tiny header strip.
+                valid = [end for end in window_bottom if (end[1] - window_top[1]) >= min_height]
+                if valid:
+                    closest = max(valid, key=lambda e: e[1])
+            if closest is None:
+                print("couldn't find {} bottom anchor with valid height".format(self.name))
+                self.detected = False
+                return False
             window_bottom = closest
             top_x, top_y, top_width, top_height = window_top
             bottom_x,bottom_y,bottom_width,bottom_height = window_bottom
