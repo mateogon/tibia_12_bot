@@ -224,6 +224,8 @@ class Bot:
         self.cavebot_record_frame_idx = 0
         self.cavebot_record_last_ms = 0
         self.cavebot_record_interval_default_ms = 120
+        self.cavebot_record_pending_mark = None
+        self.cavebot_record_pending_rows = []
         self.amp_res_stagnation_start_ms = 0
         self.amp_res_prev_far_avg_dist = None
         self.amp_res_prev_update_ms = 0
@@ -373,12 +375,15 @@ class Bot:
         self.cavebot_record_session_dir = base
         self.cavebot_record_frame_idx = 0
         self.cavebot_record_last_ms = 0
+        self.cavebot_record_pending_mark = None
+        self.cavebot_record_pending_rows = []
         self.cavebot_recording = True
         print(f"[CAVEBOT REC] recording started: {base}")
 
     def stop_cavebot_recording(self):
         if not self.cavebot_recording:
             return
+        self._flush_cavebot_record_segment(reason="stop")
         self.cavebot_recording = False
         if self.cavebot_record_trace_fp:
             try:
@@ -438,11 +443,50 @@ class Bot:
             "nearest_dist": nearest_dist,
             "nearest_rel": nearest_rel,
         }
-        try:
-            self.cavebot_record_trace_fp.write(json.dumps(rec, ensure_ascii=True) + "\n")
-            self.cavebot_record_trace_fp.flush()
-        except Exception:
-            pass
+        if self.cavebot_record_pending_mark is None:
+            self.cavebot_record_pending_mark = self.current_mark
+        if self.current_mark != self.cavebot_record_pending_mark:
+            self._flush_cavebot_record_segment(reason="mark_change", next_mark=self.current_mark)
+            self.cavebot_record_pending_mark = self.current_mark
+        self.cavebot_record_pending_rows.append(rec)
+
+    def _flush_cavebot_record_segment(self, reason="flush", next_mark=None):
+        if not self.cavebot_record_trace_fp or not self.cavebot_record_pending_rows:
+            self.cavebot_record_pending_rows = []
+            self.cavebot_record_pending_mark = None
+            return
+
+        rows = self.cavebot_record_pending_rows
+        goal_mark = self.cavebot_record_pending_mark
+        rels = [r["nearest_rel"] for r in rows if r.get("nearest_rel") is not None]
+        goal_rel = None
+        if rels:
+            xs = sorted([int(v[0]) for v in rels])
+            ys = sorted([int(v[1]) for v in rels])
+            goal_rel = [xs[len(xs)//2], ys[len(ys)//2]]
+
+        seg_size = len(rows)
+        for idx, r in enumerate(rows):
+            out = dict(r)
+            out["goal_mark"] = goal_mark
+            out["goal_rel"] = goal_rel
+            out["segment_size"] = seg_size
+            out["segment_idx"] = idx
+            out["segment_end_reason"] = reason
+            out["next_mark_after_segment"] = next_mark
+            self.cavebot_record_trace_fp.write(json.dumps(out, ensure_ascii=True) + "\n")
+        self.cavebot_record_trace_fp.flush()
+        self.cavebot_record_pending_rows = []
+        self.cavebot_record_pending_mark = None
+
+    def set_debug_goal_mark(self, mark):
+        mark = str(mark).lower().strip()
+        if mark not in self.mark_list:
+            print(f"[CAVEBOT REC] invalid goal mark: {mark}")
+            return
+        self.current_mark = mark
+        self.current_mark_index = self.mark_list.index(mark)
+        print(f"[CAVEBOT REC] goal mark set to: {self.current_mark}")
 
     def record_cavebot_snapshot_now(self):
         marks = self.getClosestMarks()

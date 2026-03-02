@@ -343,6 +343,22 @@ class ModernBotGUI:
             fg_color="#3E5A1B",
             hover_color="#5A7A26",
         ).pack(fill="x", padx=10, pady=4)
+        goal_row = ctk.CTkFrame(f_lab, fg_color="transparent")
+        goal_row.pack(fill="x", padx=10, pady=4)
+        ctk.CTkLabel(goal_row, text="Manual Goal Mark:", width=130, anchor="w").pack(side="left")
+        self.debug_goal_var = ctk.StringVar(value=str(getattr(self.bot, "current_mark", "skull")))
+        ctk.CTkOptionMenu(
+            goal_row,
+            values=["skull", "lock", "cross", "star"],
+            variable=self.debug_goal_var,
+            width=110,
+        ).pack(side="left", padx=6)
+        ctk.CTkButton(
+            goal_row,
+            text="Set Goal",
+            width=90,
+            command=lambda: self.bot.set_debug_goal_mark(self.debug_goal_var.get()),
+        ).pack(side="left")
         self._entry_row(f_lab, "Record interval ms:", "cavebot_record_interval_ms")
         ctk.CTkLabel(
             f_lab,

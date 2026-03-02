@@ -121,6 +121,14 @@ def run(session_dir):
                 resets += 1
             hold_left = hold_after_advance
 
+    # Metadata-driven summary if recorder has finalized segment labels.
+    seg_rows = [r for r in rows if "goal_mark" in r]
+    if seg_rows:
+        by_goal = {}
+        for r in seg_rows:
+            g = r.get("goal_mark", "unknown")
+            by_goal[g] = by_goal.get(g, 0) + 1
+
     print(f"Session: {session}")
     print(f"Frames: {len(rows)}")
     print(f"Cycle: {' -> '.join(cycle)}")
@@ -128,6 +136,11 @@ def run(session_dir):
     print(f"Resets: {resets}")
     print(f"Skips (no visible): {skipped_no_visible}")
     print(f"Final target mark: {cycle[current_idx]}")
+    if seg_rows:
+        print("Goal-labeled frames:")
+        for g in cycle:
+            if g in by_goal:
+                print(f"  {g}: {by_goal[g]}")
 
 
 def main():
