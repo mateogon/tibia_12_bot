@@ -2673,11 +2673,20 @@ class Bot:
     def reset_marks_history(self):
         """Manually clears the 'visited' status of map marks."""
         print("[CAVEBOT] Resetting mark history. All marks are now fresh.")
+        self._sync_mark_cycle(force_reset=True)
         for mark in self.mark_list:
             self.previous_marks[mark] = False
         # Optional: Reset index to start from the beginning of the list
         self.current_mark_index = 0
         self.current_mark = self.mark_list[0]
+        # Keep manual painter (F11/F12) aligned with cavebot reset.
+        self.add_mark_index = 0
+        self.add_mark_type = self.mark_list[0]
+        # Clear lap-memory state to truly reset history behavior.
+        self.visited_history.clear()
+        self.visited_fingerprints = []
+        self.discovery_mode = True
+        self.next_mark_eligible_ms = 0
            
     def request_attack_reacquire(self, source="unknown"):
         """
