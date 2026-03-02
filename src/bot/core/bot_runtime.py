@@ -226,6 +226,7 @@ class Bot:
         self.cavebot_record_interval_default_ms = 120
         self.cavebot_record_pending_mark = None
         self.cavebot_record_pending_rows = []
+        self.cavebot_record_last_map_small = None
         self.last_battlelist_log_ms = 0
         self.amp_res_stagnation_start_ms = 0
         self.amp_res_prev_far_avg_dist = None
@@ -391,6 +392,7 @@ class Bot:
         self.cavebot_record_last_ms = 0
         self.cavebot_record_pending_mark = None
         self.cavebot_record_pending_rows = []
+        self.cavebot_record_last_map_small = None
         self.cavebot_recording = True
         print(f"[CAVEBOT REC] recording started: {base}")
 
@@ -429,8 +431,16 @@ class Bot:
         if map_img is None:
             return
 
+        # Save only when minimap changed (unless forced snapshot/start marker).
+        small = cv2.resize(map_img, (48, 48), interpolation=cv2.INTER_AREA)
+        if not force and self.cavebot_record_last_map_small is not None:
+            delta = float(np.mean(cv2.absdiff(small, self.cavebot_record_last_map_small)))
+            if delta < 0.8:
+                return
+
         self.cavebot_record_frame_idx += 1
         self.cavebot_record_last_ms = now_ms
+        self.cavebot_record_last_map_small = small
         fname = f"frame_{self.cavebot_record_frame_idx:06d}.png"
         fpath = os.path.join(frames_dir, fname)
         try:
@@ -511,6 +521,15 @@ class Bot:
             self.stop_cavebot_recording()
         else:
             self._record_cavebot_step(marks, event="snapshot", force=True)
+
+    def record_cavebot_tick(self):
+        if not self.cavebot_recording:
+            return
+        marks = self.getClosestMarks()
+        self._record_cavebot_step(marks, event="tick", force=False)
+
+    def is_cavebot_recording(self):
+        return bool(self.cavebot_recording)
 
     def _visualize_area_rune_target(self, rel_x, rel_y, neighbors_rel=None, radius_px=None):
         if not self._bool_value(self.show_area_rune_target):
@@ -2495,7 +2514,6 @@ class Bot:
         # 1. Update basic state for this frame
         marks = self.getClosestMarks()
         self.monster_count = self.monsterCount() # Ensure this is fresh
-        self._record_cavebot_step(marks, event="tick")
         kill_time = time.time() - self.kill_start_time
         
         # --- 2. STATE MACHINE (Toggle Kill Mode) ---

@@ -31,6 +31,9 @@ class ModernBotGUI:
         self.slot_preview_label = None
         self._current_preview_image = None  # Prevents pyimage error
         self._preview_timer = None          # Prevents AttributeError
+        self._rec_status_timer_id = None
+        self.record_btn = None
+        self.rec_status_label = None
 
 
         # Start Loops
@@ -331,13 +334,20 @@ class ModernBotGUI:
         self._switch(f_logs, "Battle List Logs", "log_battlelist")
 
         f_lab = self._create_section(parent, "Cavebot Debug Lab")
-        ctk.CTkButton(
+        self.record_btn = ctk.CTkButton(
             f_lab,
             text="Start / Stop Cavebot Recording",
-            command=self.bot.toggle_cavebot_recording,
+            command=self._toggle_cavebot_recording_with_ui,
             fg_color="#5A3E1B",
             hover_color="#7A5426",
-        ).pack(fill="x", padx=10, pady=(8, 4))
+        )
+        self.record_btn.pack(fill="x", padx=10, pady=(8, 4))
+        self.rec_status_label = ctk.CTkLabel(
+            f_lab,
+            text="Recording: OFF",
+            text_color="#D16A6A",
+        )
+        self.rec_status_label.pack(anchor="w", padx=10, pady=(0, 4))
         ctk.CTkButton(
             f_lab,
             text="Save Cavebot Snapshot Now",
@@ -367,6 +377,7 @@ class ModernBotGUI:
             text="Output: training_data/cavebot_sessions/<session>/",
             text_color="#9FA8DA",
         ).pack(anchor="w", padx=10, pady=(2, 8))
+        self._update_recording_indicator()
 
         f_snap = self._create_section(parent, "Developer Tools")
         ctk.CTkButton(f_snap, text="Save Snapshot (Training Data)",
@@ -607,6 +618,9 @@ class ModernBotGUI:
         if self._preview_timer: 
             try: self.root.after_cancel(self._preview_timer)
             except: pass
+        if self._rec_status_timer_id:
+            try: self.root.after_cancel(self._rec_status_timer_id)
+            except: pass
         
         # 3. Destroy the window
         try:
@@ -619,6 +633,29 @@ class ModernBotGUI:
         # internal animation callbacks from firing on a dead window.
         import os
         os._exit(0)
+
+    def _toggle_cavebot_recording_with_ui(self):
+        self.bot.toggle_cavebot_recording()
+        self._update_recording_indicator()
+
+    def _update_recording_indicator(self):
+        is_on = False
+        try:
+            is_on = bool(self.bot.is_cavebot_recording())
+        except Exception:
+            is_on = False
+        if self.rec_status_label is not None:
+            self.rec_status_label.configure(
+                text="Recording: ON" if is_on else "Recording: OFF",
+                text_color="#5FD17A" if is_on else "#D16A6A",
+            )
+        if self.record_btn is not None:
+            self.record_btn.configure(
+                text="Stop Cavebot Recording" if is_on else "Start Cavebot Recording",
+                fg_color="#6B2E2E" if is_on else "#5A3E1B",
+            )
+        if self.running:
+            self._rec_status_timer_id = self.root.after(300, self._update_recording_indicator)
 
     def loop(self):
         if not self.running:

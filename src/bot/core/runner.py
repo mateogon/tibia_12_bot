@@ -162,6 +162,7 @@ class BotRunner:
 
                 self._periodic_actionbar_and_loot()
                 self._update_minimap_scale()
+                t0 = time.perf_counter(); self.bot.record_cavebot_tick(); self.perf.add_span("cavebot_rec", t0)
                 self._update_monsters()
                 self._update_collision_map_if_needed()
                 self._run_actions()
