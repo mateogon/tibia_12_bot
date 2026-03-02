@@ -232,7 +232,7 @@ class Bot:
         # Defaults
         self.delays.set_default("attack_click", 120)
         self.delays.set_default("area_rune", 1100, jitter_ms_fn=getNormalDelay)
-        self.delays.set_default("equip_cycle", 350)
+        self.delays.set_default("equip_cycle", 180)
         self.delays.set_default("lure_stop", 250)
         self.delays.set_default("follow_retry", int(self.follow_retry_delay * 1000))
         self.delays.set_default("exeta_res", 3000)
@@ -1959,17 +1959,19 @@ class Bot:
         now_ms = timeInMillis()
         monster_count = int(getattr(self, "monster_count", 0) or 0)
         in_combat = monster_count > 0
-        # Debounce noisy combat transitions to avoid rapid equip/unequip oscillation.
+
+        # Track combat-state transitions for asymmetric equip/unequip behavior.
         if not self.equip_state_initialized:
             self.equip_state_initialized = True
             self.equip_combat_state = in_combat
             self.equip_state_since_ms = now_ms
-            return
-        if in_combat != self.equip_combat_state:
+        elif in_combat != self.equip_combat_state:
             self.equip_combat_state = in_combat
             self.equip_state_since_ms = now_ms
-            return
-        if (now_ms - self.equip_state_since_ms) < 1200:
+
+        state_stable_ms = now_ms - self.equip_state_since_ms
+        # Allow fast equip when combat starts, but require calm period before unequip.
+        if (not in_combat) and state_stable_ms < 1200:
             return
         
         # Define the keys we care about
@@ -1985,7 +1987,7 @@ class Bot:
                     # Item is equipped/active. Unequip if safe.
                     if not in_combat:
                         # print(f"Disabling {key}")
-                        last_click_ms = int(self.equip_last_click_by_slot.get(slot_id, 0))
+                        last_click_ms = int(self.equip_last_click_by_slot.get((slot_id, "unequip"), 0))
                         if (now_ms - last_click_ms) < 2500:
                             continue
                         self.clickActionbarSlot(
@@ -1994,14 +1996,14 @@ class Bot:
                             key=key,
                             equip_action="unequip",
                         )
-                        self.equip_last_click_by_slot[slot_id] = now_ms
+                        self.equip_last_click_by_slot[(slot_id, "unequip")] = now_ms
                         return
                 else:
                     # Item is unequipped. Equip if fighting.
                     if in_combat:
                         # print(f"Enabling {key}")
-                        last_click_ms = int(self.equip_last_click_by_slot.get(slot_id, 0))
-                        if (now_ms - last_click_ms) < 2500:
+                        last_click_ms = int(self.equip_last_click_by_slot.get((slot_id, "equip"), 0))
+                        if (now_ms - last_click_ms) < 350:
                             continue
                         self.clickActionbarSlot(
                             slot_id,
@@ -2009,7 +2011,7 @@ class Bot:
                             key=key,
                             equip_action="equip",
                         )
-                        self.equip_last_click_by_slot[slot_id] = now_ms
+                        self.equip_last_click_by_slot[(slot_id, "equip")] = now_ms
                         return
             
     def isFollowing(self):
