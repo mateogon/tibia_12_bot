@@ -2689,6 +2689,7 @@ class Bot:
         positions = img.locateManyImage(self.hwnd, f"map_marks/{self.current_mark}.png", map_region, 0.90)
         
         result = []
+        visited_candidates = []
         if positions:
             for pos in positions:
                 rel_x, rel_y = int(pos[0] + pos[2]/2), int(pos[1] + pos[3]/2)
@@ -2711,6 +2712,16 @@ class Bot:
                 if not vis_lap:
                     dist = distance.euclidean(map_rel_center, (rel_x, rel_y))
                     result.append((dist, (map_region[0] + rel_x, map_region[1] + rel_y), (rel_x, rel_y)))
+                else:
+                    dist = distance.euclidean(map_rel_center, (rel_x, rel_y))
+                    visited_candidates.append((dist, (map_region[0] + rel_x, map_region[1] + rel_y), (rel_x, rel_y)))
+
+        # Permissive skull fallback:
+        # If skull is the active target and every visible skull was marked "visited this lap",
+        # still allow navigating to the closest visible skull.
+        if not result and self.current_mark == "skull" and visited_candidates:
+            visited_candidates.sort(key=lambda x: x[0])
+            result = [visited_candidates[0]]
 
         result.sort(key=lambda x: x[0])
         self.current_map_image = map_hd
