@@ -212,6 +212,7 @@ class Bot:
         self.equip_state_initialized = False
         self.equip_combat_state = False
         self.equip_state_since_ms = 0
+        self.equip_last_click_by_slot = {}
         self.amp_res_stagnation_start_ms = 0
         self.amp_res_prev_far_avg_dist = None
         self.amp_res_prev_update_ms = 0
@@ -526,7 +527,9 @@ class Bot:
         x = self.s_ActionBar.region[0]+(box_width*(pos))+2*pos
         return (x,y)
 
-    def clickActionbarSlot(self, pos, check_cooldown=True):
+    def clickActionbarSlot(self, pos, check_cooldown=True, source="", key="", equip_action=""):
+        if pos is None:
+            return False
         # 1. Defensive Cooldown Check
         if check_cooldown:
             # We use the optimized NumPy check we just wrote
@@ -538,7 +541,12 @@ class Bot:
         # Click the center of the slot, not the top-left sample pixel.
         click_x = x + 17
         click_y = y + 17
-        click_client(self.hwnd, click_x, click_y, log_action=False)
+        ctx_parts = [f"caller={source or 'unknown'}", f"slot={pos}"]
+        if key:
+            ctx_parts.append(f"key={key}")
+        if equip_action:
+            ctx_parts.append(f"equip_action={equip_action}")
+        click_client(self.hwnd, click_x, click_y, log_action=False, log_context=" ".join(ctx_parts))
         return True
     
     def updateActionbarSlotStatus(self):
@@ -1159,7 +1167,7 @@ class Bot:
         if slot is not None and self.slot_status[slot]:
             if not self.buffs['haste'] and not self.buffs['pz']:
                 if self.delays.due("haste_try"):
-                    self.clickActionbarSlot(slot)
+                    self.clickActionbarSlot(slot, source="haste")
                     self.delays.trigger("haste_try")
                 
     def eat(self):
@@ -1911,12 +1919,12 @@ class Bot:
             for slot in self.target_spells_slots:
                 if self.check_spell_cooldowns:
                     if self.checkActionBarSlotCooldown(slot):
-                        if self.clickActionbarSlot(slot):
+                        if self.clickActionbarSlot(slot, source="attackTargetSpells"):
                             self.updateLastAttackTime()
                             self.newNormalDelay()
                             return
                 else:
-                    self.clickActionbarSlot(slot)
+                    self.clickActionbarSlot(slot, source="attackTargetSpells")
                     self.updateLastAttackTime()
                     self.newNormalDelay()
                     return
@@ -1977,13 +1985,31 @@ class Bot:
                     # Item is equipped/active. Unequip if safe.
                     if not in_combat:
                         # print(f"Disabling {key}")
-                        self.clickActionbarSlot(slot_id)
+                        last_click_ms = int(self.equip_last_click_by_slot.get(slot_id, 0))
+                        if (now_ms - last_click_ms) < 2500:
+                            continue
+                        self.clickActionbarSlot(
+                            slot_id,
+                            source="manageEquipment",
+                            key=key,
+                            equip_action="unequip",
+                        )
+                        self.equip_last_click_by_slot[slot_id] = now_ms
                         return
                 else:
                     # Item is unequipped. Equip if fighting.
                     if in_combat:
                         # print(f"Enabling {key}")
-                        self.clickActionbarSlot(slot_id)
+                        last_click_ms = int(self.equip_last_click_by_slot.get(slot_id, 0))
+                        if (now_ms - last_click_ms) < 2500:
+                            continue
+                        self.clickActionbarSlot(
+                            slot_id,
+                            source="manageEquipment",
+                            key=key,
+                            equip_action="equip",
+                        )
+                        self.equip_last_click_by_slot[slot_id] = now_ms
                         return
             
     def isFollowing(self):

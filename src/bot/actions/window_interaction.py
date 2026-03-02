@@ -105,9 +105,10 @@ def press(hwnd,*args):
         win32api.SendMessage(hwnd, win32con.WM_KEYUP, data.VK_CODE[i], 0)
 
 
-def click_client(hwnd, cx, cy, log_action=False):
+def click_client(hwnd, cx, cy, log_action=False, log_context=""):
     if log_action or _ACTION_LOGGING_ENABLED:
-        _log_action(f"[ACTION] trying to left-click client=({int(cx)},{int(cy)}) hwnd={hwnd}")
+        ctx = f" {log_context}" if log_context else ""
+        _log_action(f"[ACTION] trying to left-click client=({int(cx)},{int(cy)}) hwnd={hwnd}{ctx}")
     lParam = win32api.MAKELONG(cx, cy)
     win32gui.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, lParam)
     win32gui.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, lParam)
