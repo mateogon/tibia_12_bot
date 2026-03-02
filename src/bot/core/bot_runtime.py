@@ -217,6 +217,9 @@ class Bot:
         self.equip_combat_state = False
         self.equip_state_since_ms = 0
         self.equip_last_click_by_slot = {}
+        self.next_mark_eligible_ms = 0
+        self.last_cavebot_reset_ms = 0
+        self.last_mark_scan_log_ms = 0
         self.amp_res_stagnation_start_ms = 0
         self.amp_res_prev_far_avg_dist = None
         self.amp_res_prev_update_ms = 0
@@ -268,6 +271,7 @@ class Bot:
         self.use_recenter = BooleanVar(value=s.get("use_recenter", False))
         self.use_kiting   = BooleanVar(value=s.get("use_kiting", False))
         self.use_lock_mark = BooleanVar(value=s.get("use_lock_mark", False))
+        self.log_cavebot      = BooleanVar(value=s.get("log_cavebot", False))
         self.follow_party     = BooleanVar(value=s.get("follow_party", False))
         self.manual_loot      = BooleanVar(value=s.get("manual_loot", False))
         self.loot_on_spot     = BooleanVar(value=s.get("loot_on_spot", False))
@@ -314,11 +318,23 @@ class Bot:
             return self._bool_value(getattr(self, "log_actions", False))
         if section == "perf":
             return self._bool_value(getattr(self, "log_perf", False))
+        if section == "cavebot":
+            return self._bool_value(getattr(self, "log_cavebot", False))
         return True
 
     def _sync_action_log_config(self):
         enabled = self._is_log_enabled("action")
         configure_action_logging(enabled=enabled, include_caller=True)
+
+    def _cavebot_log(self, msg, throttle_ms=0):
+        if not self._is_log_enabled("cavebot"):
+            return
+        if throttle_ms > 0:
+            now_ms = timeInMillis()
+            if (now_ms - self.last_mark_scan_log_ms) < throttle_ms:
+                return
+            self.last_mark_scan_log_ms = now_ms
+        print(f"[CAVEBOT DEBUG] {msg}")
 
     def _visualize_area_rune_target(self, rel_x, rel_y, neighbors_rel=None, radius_px=None):
         if not self._bool_value(self.show_area_rune_target):
@@ -2309,7 +2325,15 @@ class Bot:
             if self.kill and self.kiting_mode.get().lower() == "forward":
                 arrival_threshold = 18
 
+            now_ms = timeInMillis()
             if dist <= arrival_threshold:
+                if now_ms < self.next_mark_eligible_ms:
+                    self._cavebot_log(
+                        f"arrival ignored mark={self.current_mark} dist={int(dist)} "
+                        f"cooldown_left={self.next_mark_eligible_ms - now_ms}ms",
+                        throttle_ms=120,
+                    )
+                    return
                 # --- MEMORY & DISCOVERY ---
                 # Update memory so Backward kiting knows where we just were
                 self.last_reached_mark_rel = rel_pos
@@ -2343,15 +2367,32 @@ class Bot:
 
         # --- 4. NAVIGATION RESET (Fallback if no marks visible) ---
         if not marks:
+            now_ms = timeInMillis()
             if self.current_mark == self.mark_list[-1]: 
+                if (now_ms - self.last_cavebot_reset_ms) < 800:
+                    self._cavebot_log(
+                        f"reset throttled mark={self.current_mark} dt={now_ms - self.last_cavebot_reset_ms}ms",
+                        throttle_ms=120,
+                    )
+                    return
                 self.loop_count += 1
                 self.discovery_mode = False
                 print(f"[CAVEBOT] Loop #{self.loop_count} Reset.")
                 self.current_mark_index = 0
                 self.current_mark = self.mark_list[0]
+                self.last_cavebot_reset_ms = now_ms
+                self._cavebot_log("reset -> skull (last mark had no candidates)", throttle_ms=0)
                 marks = self.getClosestMarks() 
                 if not marks: return 
             else:
+                if now_ms < self.next_mark_eligible_ms:
+                    self._cavebot_log(
+                        f"skip advance (cooldown) mark={self.current_mark} "
+                        f"left={self.next_mark_eligible_ms - now_ms}ms",
+                        throttle_ms=120,
+                    )
+                    return
+                self._cavebot_log(f"no candidates for {self.current_mark}, advancing", throttle_ms=120)
                 self.nextMark()
                 return
 
@@ -2663,6 +2704,7 @@ class Bot:
             
         self.current_mark = self.mark_list[self.current_mark_index]
         print(f"[CAVEBOT] Next target mark: {self.current_mark}")
+        self.next_mark_eligible_ms = timeInMillis() + 450
         
         # Debounce to prevent skipping multiple marks in one frame
         self.delays.trigger("walk", base_ms=500)
@@ -2745,6 +2787,12 @@ class Bot:
         if not result and self.current_mark == "skull" and visited_candidates:
             visited_candidates.sort(key=lambda x: x[0])
             result = [visited_candidates[0]]
+
+        self._cavebot_log(
+            f"scan mark={self.current_mark} thr={mark_thr:.2f} visible={len(positions) if positions else 0} "
+            f"candidates={len(result)} visited={len(visited_candidates)}",
+            throttle_ms=250,
+        )
 
         result.sort(key=lambda x: x[0])
         self.current_map_image = map_hd
