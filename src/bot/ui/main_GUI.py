@@ -62,6 +62,7 @@ class ModernBotGUI:
             'use_magic_shield',
             "use_static_lure",
             "log_cavebot",
+            "cavebot_record_interval_ms",
             "log_enabled", "log_actions", "log_perf",
         ]
         
@@ -326,6 +327,28 @@ class ModernBotGUI:
         self._switch(f_logs, "Enable Debug Logging", "log_enabled")
         self._switch(f_logs, "Action Click Logs", "log_actions")
         self._switch(f_logs, "Performance Logs", "log_perf")
+
+        f_lab = self._create_section(parent, "Cavebot Debug Lab")
+        ctk.CTkButton(
+            f_lab,
+            text="Start / Stop Cavebot Recording",
+            command=self.bot.toggle_cavebot_recording,
+            fg_color="#5A3E1B",
+            hover_color="#7A5426",
+        ).pack(fill="x", padx=10, pady=(8, 4))
+        ctk.CTkButton(
+            f_lab,
+            text="Save Cavebot Snapshot Now",
+            command=self.bot.record_cavebot_snapshot_now,
+            fg_color="#3E5A1B",
+            hover_color="#5A7A26",
+        ).pack(fill="x", padx=10, pady=4)
+        self._entry_row(f_lab, "Record interval ms:", "cavebot_record_interval_ms")
+        ctk.CTkLabel(
+            f_lab,
+            text="Output: training_data/cavebot_sessions/<session>/",
+            text_color="#9FA8DA",
+        ).pack(anchor="w", padx=10, pady=(2, 8))
 
         f_snap = self._create_section(parent, "Developer Tools")
         ctk.CTkButton(f_snap, text="Save Snapshot (Training Data)",

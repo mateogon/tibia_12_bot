@@ -217,6 +217,13 @@ class Bot:
         self.next_mark_eligible_ms = 0
         self.last_cavebot_reset_ms = 0
         self.last_mark_scan_log_ms = 0
+        self.last_mark_scan_info = {}
+        self.cavebot_recording = False
+        self.cavebot_record_session_dir = None
+        self.cavebot_record_trace_fp = None
+        self.cavebot_record_frame_idx = 0
+        self.cavebot_record_last_ms = 0
+        self.cavebot_record_interval_ms = 120
         self.amp_res_stagnation_start_ms = 0
         self.amp_res_prev_far_avg_dist = None
         self.amp_res_prev_update_ms = 0
@@ -269,6 +276,7 @@ class Bot:
         self.use_recenter = BooleanVar(value=s.get("use_recenter", False))
         self.use_kiting   = BooleanVar(value=s.get("use_kiting", False))
         self.log_cavebot      = BooleanVar(value=s.get("log_cavebot", False))
+        self.cavebot_record_interval_ms = IntVar(value=int(s.get("cavebot_record_interval_ms", 120)))
         self.follow_party     = BooleanVar(value=s.get("follow_party", False))
         self.manual_loot      = BooleanVar(value=s.get("manual_loot", False))
         self.loot_on_spot     = BooleanVar(value=s.get("loot_on_spot", False))
@@ -347,6 +355,104 @@ class Bot:
                 return
             self.last_mark_scan_log_ms = now_ms
         print(f"[CAVEBOT DEBUG] {msg}")
+
+    def _ensure_cavebot_recording_dir(self, session_name=None):
+        if not session_name:
+            session_name = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        base = os.path.join(self.base_directory, "training_data", "cavebot_sessions", session_name)
+        frames = os.path.join(base, "frames")
+        os.makedirs(frames, exist_ok=True)
+        return base, frames
+
+    def start_cavebot_recording(self, session_name=None):
+        if self.cavebot_recording:
+            return
+        base, _ = self._ensure_cavebot_recording_dir(session_name=session_name)
+        trace_path = os.path.join(base, "trace.jsonl")
+        self.cavebot_record_trace_fp = open(trace_path, "a", encoding="utf-8")
+        self.cavebot_record_session_dir = base
+        self.cavebot_record_frame_idx = 0
+        self.cavebot_record_last_ms = 0
+        self.cavebot_recording = True
+        print(f"[CAVEBOT REC] recording started: {base}")
+
+    def stop_cavebot_recording(self):
+        if not self.cavebot_recording:
+            return
+        self.cavebot_recording = False
+        if self.cavebot_record_trace_fp:
+            try:
+                self.cavebot_record_trace_fp.flush()
+                self.cavebot_record_trace_fp.close()
+            except Exception:
+                pass
+        self.cavebot_record_trace_fp = None
+        print("[CAVEBOT REC] recording stopped")
+
+    def toggle_cavebot_recording(self):
+        if self.cavebot_recording:
+            self.stop_cavebot_recording()
+        else:
+            self.start_cavebot_recording()
+
+    def _record_cavebot_step(self, marks, event="tick", force=False):
+        if not self.cavebot_recording:
+            return
+        now_ms = timeInMillis()
+        interval_ms = int(self.cavebot_record_interval_ms.get()) if hasattr(self.cavebot_record_interval_ms, "get") else 120
+        if not force and (now_ms - self.cavebot_record_last_ms) < max(40, interval_ms):
+            return
+
+        if not self.cavebot_record_session_dir:
+            return
+        frames_dir = os.path.join(self.cavebot_record_session_dir, "frames")
+        map_img = img.screengrab_array(self.hwnd, self.s_Map.region)
+        if map_img is None:
+            return
+
+        self.cavebot_record_frame_idx += 1
+        self.cavebot_record_last_ms = now_ms
+        fname = f"frame_{self.cavebot_record_frame_idx:06d}.png"
+        fpath = os.path.join(frames_dir, fname)
+        try:
+            cv2.imwrite(fpath, map_img)
+        except Exception:
+            return
+
+        nearest_dist = None
+        nearest_rel = None
+        if marks:
+            nearest_dist = float(marks[0][0])
+            nearest_rel = [int(marks[0][2][0]), int(marks[0][2][1])]
+
+        rec = {
+            "ts_ms": int(now_ms),
+            "event": event,
+            "frame": fname,
+            "current_mark": self.current_mark,
+            "current_mark_index": int(self.current_mark_index),
+            "mark_list": list(self.mark_list),
+            "monster_count": int(getattr(self, "monster_count", 0)),
+            "kill_mode": bool(self.kill),
+            "scan": dict(getattr(self, "last_mark_scan_info", {})),
+            "nearest_dist": nearest_dist,
+            "nearest_rel": nearest_rel,
+        }
+        try:
+            self.cavebot_record_trace_fp.write(json.dumps(rec, ensure_ascii=True) + "\n")
+            self.cavebot_record_trace_fp.flush()
+        except Exception:
+            pass
+
+    def record_cavebot_snapshot_now(self):
+        marks = self.getClosestMarks()
+        if not self.cavebot_recording:
+            # one-shot session
+            self.start_cavebot_recording()
+            self._record_cavebot_step(marks, event="snapshot", force=True)
+            self.stop_cavebot_recording()
+        else:
+            self._record_cavebot_step(marks, event="snapshot", force=True)
 
     def _visualize_area_rune_target(self, rel_x, rel_y, neighbors_rel=None, radius_px=None):
         if not self._bool_value(self.show_area_rune_target):
@@ -2312,6 +2418,7 @@ class Bot:
         # 1. Update basic state for this frame
         marks = self.getClosestMarks()
         self.monster_count = self.monsterCount() # Ensure this is fresh
+        self._record_cavebot_step(marks, event="tick")
         kill_time = time.time() - self.kill_start_time
         
         # --- 2. STATE MACHINE (Toggle Kill Mode) ---
@@ -2812,6 +2919,13 @@ class Bot:
             visited_candidates.sort(key=lambda x: x[0])
             result = [visited_candidates[0]]
 
+        self.last_mark_scan_info = {
+            "mark": self.current_mark,
+            "threshold": float(mark_thr),
+            "visible_count": int(len(positions) if positions else 0),
+            "candidate_count": int(len(result)),
+            "visited_count": int(len(visited_candidates)),
+        }
         self._cavebot_log(
             f"scan mark={self.current_mark} thr={mark_thr:.2f} visible={len(positions) if positions else 0} "
             f"candidates={len(result)} visited={len(visited_candidates)}",
