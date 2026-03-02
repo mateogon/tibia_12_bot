@@ -62,6 +62,7 @@ class ModernBotGUI:
             'use_magic_shield',
             "use_static_lure",
             "log_cavebot",
+            "log_battlelist",
             "cavebot_record_interval_ms",
             "log_enabled", "log_actions", "log_perf",
         ]
@@ -327,6 +328,7 @@ class ModernBotGUI:
         self._switch(f_logs, "Enable Debug Logging", "log_enabled")
         self._switch(f_logs, "Action Click Logs", "log_actions")
         self._switch(f_logs, "Performance Logs", "log_perf")
+        self._switch(f_logs, "Battle List Logs", "log_battlelist")
 
         f_lab = self._create_section(parent, "Cavebot Debug Lab")
         ctk.CTkButton(

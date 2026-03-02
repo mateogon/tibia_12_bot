@@ -226,6 +226,7 @@ class Bot:
         self.cavebot_record_interval_default_ms = 120
         self.cavebot_record_pending_mark = None
         self.cavebot_record_pending_rows = []
+        self.last_battlelist_log_ms = 0
         self.amp_res_stagnation_start_ms = 0
         self.amp_res_prev_far_avg_dist = None
         self.amp_res_prev_update_ms = 0
@@ -278,6 +279,7 @@ class Bot:
         self.use_recenter = BooleanVar(value=s.get("use_recenter", False))
         self.use_kiting   = BooleanVar(value=s.get("use_kiting", False))
         self.log_cavebot      = BooleanVar(value=s.get("log_cavebot", False))
+        self.log_battlelist   = BooleanVar(value=s.get("log_battlelist", False))
         self.cavebot_record_interval_ms = IntVar(value=int(s.get("cavebot_record_interval_ms", 120)))
         self.follow_party     = BooleanVar(value=s.get("follow_party", False))
         self.manual_loot      = BooleanVar(value=s.get("manual_loot", False))
@@ -327,6 +329,8 @@ class Bot:
             return self._bool_value(getattr(self, "log_perf", False))
         if section == "cavebot":
             return self._bool_value(getattr(self, "log_cavebot", False))
+        if section == "battlelist":
+            return self._bool_value(getattr(self, "log_battlelist", False))
         return True
 
     def _sync_action_log_config(self):
@@ -357,6 +361,16 @@ class Bot:
                 return
             self.last_mark_scan_log_ms = now_ms
         print(f"[CAVEBOT DEBUG] {msg}")
+
+    def _battlelist_log(self, msg, throttle_ms=0):
+        if not self._is_log_enabled("battlelist"):
+            return
+        if throttle_ms > 0:
+            now_ms = timeInMillis()
+            if (now_ms - self.last_battlelist_log_ms) < throttle_ms:
+                return
+            self.last_battlelist_log_ms = now_ms
+        print(f"[BATTLELIST DEBUG] {msg}")
 
     def _ensure_cavebot_recording_dir(self, session_name=None):
         if not session_name:
@@ -1476,6 +1490,10 @@ class Bot:
                 color = img.GetPixelRGBColor(self.hwnd,(x, y))
                 if (color == (0,0,0)):
                     count += 1
+        self._battlelist_log(
+            f"monsterCount count={count} scan_x={x} first_y={first_pos} step={d} region={self.s_BattleList.region}",
+            throttle_ms=500,
+        )
         return count
     def checkMonsterQueue(self):
         if not self.check_monster_queue:
@@ -1589,7 +1607,21 @@ class Bot:
                 if force:
                     self.last_force_attack_request_ms = now_ms
                 return
-            
+        # No valid row found; emit sampled row diagnostics.
+        samples = []
+        row_n = 0
+        for rel_y in range(start_y, height, step_y):
+            if rel_y >= height or rel_x >= width or row_n >= 8:
+                break
+            p = image[rel_y, rel_x]
+            is_candidate = (p[0] == 0 and p[1] == 0 and p[2] == 0)
+            samples.append(f"r{row_n}@y={rel_y}:bgr=({int(p[0])},{int(p[1])},{int(p[2])}) black={int(is_candidate)}")
+            row_n += 1
+        self._battlelist_log(
+            f"clickAttack no target force={force} monster_count={getattr(self, 'monster_count', 0)} "
+            f"region={region} samples={' | '.join(samples)}",
+            throttle_ms=500,
+        )
 
     def stopAttacking(self):
         b_x, b_y,_,b_y2 = self.s_BattleList.region
@@ -1970,7 +2002,8 @@ class Bot:
 
         # Actualizar monstruos alrededor (usando el área de hechizos configurada)
         self.monsters_around = self.getMonstersAround(self.areaspell_area, True, True)
-        self.monster_count = self.monsterCount()
+        # Keep runner-provided unified count (battle list + on-screen fallback).
+        self.monster_count = max(int(getattr(self, "monster_count", 0)), len(self.monster_positions))
 
         # --- Exeta Res ---
         if self.monsters_around > 0:
@@ -1991,7 +2024,7 @@ class Bot:
         Returns True if a spell was cast (triggered GCD).
         """
         # 1. Safety & Cooldown Checks
-        if self.buffs.get('pz', False) or self.monsterCount() == 0:
+        if self.buffs.get('pz', False) or int(getattr(self, "monster_count", 0)) == 0:
             return False
             
         # Check explicit delay (Global Cooldown)
@@ -2032,7 +2065,7 @@ class Bot:
 
         if not test:
             if self.buffs.get('pz', False): return False
-            if self.monsterCount() < min_monsters: return False
+            if int(getattr(self, "monster_count", 0)) < min_monsters: return False
             # Check internal Rune Timer AND Global Cooldown (Runes share group CD)
             if not self.delays.due("area_rune"): return False
             
@@ -2091,7 +2124,7 @@ class Bot:
         """
         Standard single target rotation (Exori Vis, etc).
         """
-        if self.buffs.get('pz', False) or self.monsterCount() == 0: return
+        if self.buffs.get('pz', False) or int(getattr(self, "monster_count", 0)) == 0: return
 
         cur_sleep = timeInMillis() - self.last_attack_time
         if cur_sleep <= (100 + self.normal_delay):
