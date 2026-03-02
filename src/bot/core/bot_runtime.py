@@ -223,7 +223,7 @@ class Bot:
         self.cavebot_record_trace_fp = None
         self.cavebot_record_frame_idx = 0
         self.cavebot_record_last_ms = 0
-        self.cavebot_record_interval_ms = 120
+        self.cavebot_record_interval_default_ms = 120
         self.amp_res_stagnation_start_ms = 0
         self.amp_res_prev_far_avg_dist = None
         self.amp_res_prev_update_ms = 0
