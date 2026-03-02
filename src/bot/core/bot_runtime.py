@@ -270,6 +270,9 @@ class Bot:
         self.use_haste        = BooleanVar(value=s.get("use_haste", True))
         self.use_food         = BooleanVar(value=s.get("use_food", True))
         self.use_magic_shield = BooleanVar(value=s.get("use_magic_shield", False))
+        self.log_enabled      = BooleanVar(value=s.get("log_enabled", True))
+        self.log_actions      = BooleanVar(value=s.get("log_actions", False))
+        self.log_perf         = BooleanVar(value=s.get("log_perf", False))
 
         self.hp_thresh_high        = IntVar(value=int(s.get("hp_thresh_high", 90)))
         self.hp_thresh_low         = IntVar(value=int(s.get("hp_thresh_low", 70)))
@@ -281,12 +284,31 @@ class Bot:
 
         self.party_leader    = StringVar(value=str(s.get("party_leader", "")))
         self.waypoint_folder = StringVar(value=str(s.get("waypoint_folder", "test")))
+        self._sync_action_log_config()
+        for v in (self.log_enabled, self.log_actions):
+            try:
+                v.trace_add("write", lambda *a: self._sync_action_log_config())
+            except Exception:
+                pass
 
     def _bool_value(self, v):
         try:
             return bool(v.get())
         except Exception:
             return bool(v)
+
+    def _is_log_enabled(self, section=None):
+        if not self._bool_value(getattr(self, "log_enabled", True)):
+            return False
+        if section == "action":
+            return self._bool_value(getattr(self, "log_actions", False))
+        if section == "perf":
+            return self._bool_value(getattr(self, "log_perf", False))
+        return True
+
+    def _sync_action_log_config(self):
+        enabled = self._is_log_enabled("action")
+        configure_action_logging(enabled=enabled, include_caller=True)
 
     def _visualize_area_rune_target(self, rel_x, rel_y, neighbors_rel=None, radius_px=None):
         if not self._bool_value(self.show_area_rune_target):
@@ -2555,7 +2577,8 @@ class Bot:
 
     def clickStop(self, reason="generic"):
         region = self.s_Stop.getCenter()
-        print(f"[ACTION] trying to click STOP reason={reason} at client=({region[0]},{region[1]})")
+        if self._is_log_enabled("action"):
+            print(f"[ACTION] trying to click STOP reason={reason} at client=({region[0]},{region[1]})")
         click_client(self.hwnd,region[0],region[1])
 
     def getMonsterDetectionDebugImage(self):

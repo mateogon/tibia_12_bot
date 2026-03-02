@@ -9,11 +9,12 @@ from typing import Dict
 class PerfTracker:
     """Collects per-cycle timings and prints 1s rolling reports."""
 
-    def __init__(self) -> None:
+    def __init__(self, should_print_fn=None) -> None:
         self._last_t = time.perf_counter()
         self._last_count = 0
         self._samples = 0
         self._totals_ms: Dict[str, float] = {}
+        self._should_print_fn = should_print_fn or (lambda: True)
 
     def add_span(self, name: str, t0: float) -> None:
         dt_ms = (time.perf_counter() - t0) * 1000.0
@@ -29,6 +30,12 @@ class PerfTracker:
         now = time.perf_counter()
         dt = now - self._last_t
         if dt < 1.0:
+            return
+        if not self._should_print_fn():
+            self._last_t = now
+            self._last_count = cycle_count
+            self._samples = 0
+            self._totals_ms = {}
             return
 
         cps = (cycle_count - self._last_count) / dt

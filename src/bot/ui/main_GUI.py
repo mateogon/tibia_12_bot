@@ -61,6 +61,7 @@ class ModernBotGUI:
             'use_recenter', 'use_kiting',
             'use_magic_shield',
             "use_static_lure",
+            "log_enabled", "log_actions", "log_perf",
         ]
         
         for key in keys:
@@ -319,6 +320,11 @@ class ModernBotGUI:
         self.map_label.pack(fill="both", expand=True, padx=10, pady=10)
 
     def _build_settings_tab(self, parent):
+        f_logs = self._create_section(parent, "Debug Logging")
+        self._switch(f_logs, "Enable Debug Logging", "log_enabled")
+        self._switch(f_logs, "Action Click Logs", "log_actions")
+        self._switch(f_logs, "Performance Logs", "log_perf")
+
         f_snap = self._create_section(parent, "Developer Tools")
         ctk.CTkButton(f_snap, text="Save Snapshot (Training Data)",
                       command=self.bot.capture_training_data,

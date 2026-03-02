@@ -16,7 +16,13 @@ class BotRunner:
         self.start_time = time.time()
         self.perf_last_bg_seq = -1
         self.last_slot_status_second = -1
-        self.perf = PerfTracker()
+        self.perf = PerfTracker(should_print_fn=self._should_print_perf)
+
+    def _should_print_perf(self):
+        try:
+            return bool(self.bot._is_log_enabled("perf"))
+        except Exception:
+            return False
 
     def _ingest_bg_metrics(self) -> None:
         bg_seq = getattr(self.bot.bg, "metrics_seq", -1)
