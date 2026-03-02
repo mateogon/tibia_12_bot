@@ -5,12 +5,21 @@ from ..config import data
 
 _ACTION_LOGGING_ENABLED = False
 _ACTION_LOGGING_INCLUDE_CALLER = True
+_ACTION_LOG_DEDUPE_MS = 350
+_LAST_ACTION_LOG_LINE = ""
+_LAST_ACTION_LOG_TS_MS = 0
+_SUPPRESSED_ACTION_LOGS = 0
 
 
 def configure_action_logging(enabled=False, include_caller=True):
     global _ACTION_LOGGING_ENABLED, _ACTION_LOGGING_INCLUDE_CALLER
+    global _LAST_ACTION_LOG_LINE, _LAST_ACTION_LOG_TS_MS, _SUPPRESSED_ACTION_LOGS
     _ACTION_LOGGING_ENABLED = bool(enabled)
     _ACTION_LOGGING_INCLUDE_CALLER = bool(include_caller)
+    # Reset dedupe state whenever logging mode changes.
+    _LAST_ACTION_LOG_LINE = ""
+    _LAST_ACTION_LOG_TS_MS = 0
+    _SUPPRESSED_ACTION_LOGS = 0
 
 
 def _caller_tag():
@@ -28,8 +37,24 @@ def _caller_tag():
 
 
 def _log_action(msg):
-    if _ACTION_LOGGING_ENABLED:
-        print(f"{msg}{_caller_tag()}")
+    global _LAST_ACTION_LOG_LINE, _LAST_ACTION_LOG_TS_MS, _SUPPRESSED_ACTION_LOGS
+    if not _ACTION_LOGGING_ENABLED:
+        return
+
+    now_ms = int(time.time() * 1000)
+    line = f"{msg}{_caller_tag()}"
+    if line == _LAST_ACTION_LOG_LINE and (now_ms - _LAST_ACTION_LOG_TS_MS) < _ACTION_LOG_DEDUPE_MS:
+        _SUPPRESSED_ACTION_LOGS += 1
+        return
+
+    if _SUPPRESSED_ACTION_LOGS > 0 and _LAST_ACTION_LOG_LINE:
+        print(f"{_LAST_ACTION_LOG_LINE} [x{_SUPPRESSED_ACTION_LOGS + 1}]")
+        _SUPPRESSED_ACTION_LOGS = 0
+    else:
+        print(line)
+
+    _LAST_ACTION_LOG_LINE = line
+    _LAST_ACTION_LOG_TS_MS = now_ms
 
 def isTopWindow(hwnd):
     current_window = win32gui.GetForegroundWindow()
@@ -82,7 +107,7 @@ def press(hwnd,*args):
 
 def click_client(hwnd, cx, cy, log_action=False):
     if log_action or _ACTION_LOGGING_ENABLED:
-        print(f"[ACTION] trying to left-click client=({int(cx)},{int(cy)}) hwnd={hwnd}{_caller_tag()}")
+        _log_action(f"[ACTION] trying to left-click client=({int(cx)},{int(cy)}) hwnd={hwnd}")
     lParam = win32api.MAKELONG(cx, cy)
     win32gui.PostMessage(hwnd, win32con.WM_LBUTTONDOWN, win32con.MK_LBUTTON, lParam)
     win32gui.PostMessage(hwnd, win32con.WM_LBUTTONUP, 0, lParam)

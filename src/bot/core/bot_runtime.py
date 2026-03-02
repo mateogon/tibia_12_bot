@@ -209,6 +209,9 @@ class Bot:
         self.enable_boss_sequences = False
         self.last_walk_click_pos = None
         self.last_walk_click_ms = 0
+        self.equip_state_initialized = False
+        self.equip_combat_state = False
+        self.equip_state_since_ms = 0
         self.amp_res_stagnation_start_ms = 0
         self.amp_res_prev_far_avg_dist = None
         self.amp_res_prev_update_ms = 0
@@ -228,12 +231,13 @@ class Bot:
         # Defaults
         self.delays.set_default("attack_click", 120)
         self.delays.set_default("area_rune", 1100, jitter_ms_fn=getNormalDelay)
-        self.delays.set_default("equip_cycle", 200)
+        self.delays.set_default("equip_cycle", 350)
         self.delays.set_default("lure_stop", 250)
         self.delays.set_default("follow_retry", int(self.follow_retry_delay * 1000))
         self.delays.set_default("exeta_res", 3000)
         self.delays.set_default("amp_res", 6000)
         self.delays.set_default("utito", 10000)
+        self.delays.set_default("haste_try", 900)
         self.delays.set_default("heal_low_try", 350)
         self.delays.set_default("heal_high_try", 450)
         self.delays.set_default("centering", 250) # Only recenter every 1.5s
@@ -1154,7 +1158,9 @@ class Bot:
         slot = self.slots.get("haste")
         if slot is not None and self.slot_status[slot]:
             if not self.buffs['haste'] and not self.buffs['pz']:
-                self.clickActionbarSlot(slot)
+                if self.delays.due("haste_try"):
+                    self.clickActionbarSlot(slot)
+                    self.delays.trigger("haste_try")
                 
     def eat(self):
         slot = self.slots.get("food")
@@ -1799,7 +1805,7 @@ class Bot:
             
         # Check explicit delay (Global Cooldown)
         cur_sleep = timeInMillis() - self.last_attack_time
-        if (timeInMillis() - cur_sleep <= (100 + self.normal_delay)):
+        if cur_sleep <= (100 + self.normal_delay):
             return False
 
         # 2. Check Conditions
@@ -1841,7 +1847,7 @@ class Bot:
             
             # Don't rune if we just cast a spell (GCD protection)
             cur_sleep = timeInMillis() - self.last_attack_time
-            if (timeInMillis() - cur_sleep <= (100 + self.normal_delay)):
+            if cur_sleep <= (100 + self.normal_delay):
                 return False
 
         # --- Clustering Logic (Same as before) ---
@@ -1897,7 +1903,7 @@ class Bot:
         if self.buffs.get('pz', False) or self.monsterCount() == 0: return
 
         cur_sleep = timeInMillis() - self.last_attack_time
-        if (timeInMillis() - cur_sleep <= (100 + self.normal_delay)):
+        if cur_sleep <= (100 + self.normal_delay):
             return
 
         # Only cast if we have at least 1 monster
@@ -1941,8 +1947,22 @@ class Bot:
     def manageEquipment(self):
         if not self.delays.allow("equip_cycle"):
             return
-            
-        monster_count = self.monsterCount()
+
+        now_ms = timeInMillis()
+        monster_count = int(getattr(self, "monster_count", 0) or 0)
+        in_combat = monster_count > 0
+        # Debounce noisy combat transitions to avoid rapid equip/unequip oscillation.
+        if not self.equip_state_initialized:
+            self.equip_state_initialized = True
+            self.equip_combat_state = in_combat
+            self.equip_state_since_ms = now_ms
+            return
+        if in_combat != self.equip_combat_state:
+            self.equip_combat_state = in_combat
+            self.equip_state_since_ms = now_ms
+            return
+        if (now_ms - self.equip_state_since_ms) < 1200:
+            return
         
         # Define the keys we care about
         equip_keys = ["weapon", "helmet", "armor", "amulet", "ring", "shield"]
@@ -1955,16 +1975,16 @@ class Bot:
             if slot_id < len(self.slot_status) and self.slot_status[slot_id]:
                 if self.isActionbarSlotEnabled(slot_id):
                     # Item is equipped/active. Unequip if safe.
-                    if monster_count == 0:
+                    if not in_combat:
                         # print(f"Disabling {key}")
                         self.clickActionbarSlot(slot_id)
-                        time.sleep(0.05)
+                        return
                 else:
                     # Item is unequipped. Equip if fighting.
-                    if monster_count > 0:
+                    if in_combat:
                         # print(f"Enabling {key}")
                         self.clickActionbarSlot(slot_id)
-                        time.sleep(0.05)
+                        return
             
     def isFollowing(self):
         x1, y1, x2, y2 = self.s_Party.region
