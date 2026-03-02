@@ -173,10 +173,7 @@ class Bot:
         self.loop_count = 0
         self.circuit_marks_found = 0
         # Default cavebot cycle (shared by F11/F12 painter + cave navigation).
-        # Lock mark can be optionally enabled from settings.
         self.mark_list = ["skull", "cross", "star"]
-        if self._bool_value(getattr(self, "use_lock_mark", False)):
-            self.mark_list = ["skull", "lock", "cross", "star"]
         self.current_mark_index = 0
         self.current_mark = self.mark_list[0]
         # NEW: Separate index for the manual mark-placer
@@ -228,6 +225,7 @@ class Bot:
         self.amp_res_far_anchor = None
         self.amp_res_far_anchor_start_ms = 0
         self.amp_res_debug = {}
+        self._sync_mark_cycle(force_reset=True)
     def _init_timers(self):
         self.normal_delay = getNormalDelay()
         self.delays = DelayManager(default_jitter_ms_fn=getNormalDelay)
@@ -325,6 +323,23 @@ class Bot:
     def _sync_action_log_config(self):
         enabled = self._is_log_enabled("action")
         configure_action_logging(enabled=enabled, include_caller=True)
+
+    def _desired_mark_cycle(self):
+        if self._bool_value(getattr(self, "use_lock_mark", False)):
+            return ["skull", "lock", "cross", "star"]
+        return ["skull", "cross", "star"]
+
+    def _sync_mark_cycle(self, force_reset=False):
+        desired = self._desired_mark_cycle()
+        if force_reset or self.mark_list != desired:
+            prev_mark = getattr(self, "current_mark", desired[0])
+            self.mark_list = desired
+            if force_reset or prev_mark not in self.mark_list:
+                self.current_mark_index = 0
+                self.current_mark = self.mark_list[0]
+            else:
+                self.current_mark_index = self.mark_list.index(prev_mark)
+                self.current_mark = prev_mark
 
     def _cavebot_log(self, msg, throttle_ms=0):
         if not self._is_log_enabled("cavebot"):
@@ -2296,6 +2311,7 @@ class Bot:
                 self.click_walk_target(abs_pos[0], abs_pos[1], min_interval_ms=450, min_delta_px=5)
 
     def cavebottest(self):
+        self._sync_mark_cycle()
         # 1. Update basic state for this frame
         marks = self.getClosestMarks()
         self.monster_count = self.monsterCount() # Ensure this is fresh
@@ -2698,6 +2714,7 @@ class Bot:
         self.previous_marks[self.current_mark] = self.getCenterMarkImage()
     
     def nextMark(self):
+        self._sync_mark_cycle()
         self.current_mark_index += 1
         if self.current_mark_index >= len(self.mark_list):
             self.current_mark_index = 0
@@ -2711,6 +2728,7 @@ class Bot:
     
     def nextAddMark(self):
         """Advances the sequence for the manual painting tool only."""
+        self._sync_mark_cycle()
         self.add_mark_index += 1
         if self.add_mark_index >= len(self.mark_list):
             self.add_mark_index = 0
