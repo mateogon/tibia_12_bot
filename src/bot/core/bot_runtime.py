@@ -4255,6 +4255,144 @@ class Bot:
         cx, cy, dx, dy = best_meta
         return best_local, cx, cy, dx, dy
 
+    def _estimate_player_cross_center(self, map_img):
+        """
+        Estimate minimap center from player cross pixels near map center.
+        Returns (cx, cy) or None when not confidently found.
+        """
+        try:
+            mh, mw = map_img.shape[:2]
+            cx0, cy0 = mw // 2, mh // 2
+
+            # Search only around the expected center to avoid UI noise.
+            r = 8
+            x0, x1 = max(0, cx0 - r), min(mw, cx0 + r + 1)
+            y0, y1 = max(0, cy0 - r), min(mh, cy0 + r + 1)
+            roi = map_img[y0:y1, x0:x1]
+            if roi.size == 0:
+                return None
+
+            # Player cross is bright/white-ish on minimap.
+            lower = np.array([210, 210, 210], dtype=np.uint8)
+            upper = np.array([255, 255, 255], dtype=np.uint8)
+            mask = cv2.inRange(roi, lower, upper)
+            if int(np.count_nonzero(mask)) < 3:
+                return None
+
+            n, _labels, stats, cents = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), connectivity=8)
+            if n <= 1:
+                return None
+
+            best_idx = None
+            best_score = None
+            for i in range(1, n):
+                area = int(stats[i, cv2.CC_STAT_AREA])
+                if area < 2:
+                    continue
+                cxr, cyr = float(cents[i][0]), float(cents[i][1])
+                abs_x = x0 + cxr
+                abs_y = y0 + cyr
+                dist = float(((abs_x - cx0) ** 2 + (abs_y - cy0) ** 2) ** 0.5)
+                # Prefer component closest to center and with moderate size.
+                score = dist + (0.15 * abs(area - 6))
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_idx = i
+
+            if best_idx is None:
+                return None
+            cxr, cyr = cents[best_idx]
+            return int(round(x0 + cxr)), int(round(y0 + cyr))
+        except Exception:
+            return None
+
+    def _estimate_grid_center_from_transitions(self, map_img, S):
+        """
+        Estimate minimap grid center phase using terrain color transitions.
+        This follows the same 'switch/switch spacing' principle used for zoom detection,
+        but solves origin phase (mod S) for x/y sampling.
+        """
+        try:
+            s = int(max(1, S))
+            mh, mw = map_img.shape[:2]
+            cx0, cy0 = mw // 2, mh // 2
+            if s <= 1:
+                return cx0, cy0
+
+            # Precompute terrain membership codes.
+            if not hasattr(self, "_terrain_codes_u32"):
+                terrain = np.array(BotConstants.OBSTACLES + BotConstants.WALKABLE, dtype=np.uint8)
+                self._terrain_codes_u32 = (
+                    (terrain[:, 0].astype(np.uint32) << 16)
+                    | (terrain[:, 1].astype(np.uint32) << 8)
+                    | terrain[:, 2].astype(np.uint32)
+                )
+
+            x_start, x_end = max(0, cx0 - 90), min(mw, cx0 + 90)
+            y_start, y_end = max(0, cy0 - 60), min(mh, cy0 + 60)
+
+            # Horizontal strips (solve x-phase): fixed y, varying x.
+            h_strips = [
+                (map_img[np.clip(cy0 - 40, 0, mh - 1), x_start:x_end], x_start),
+                (map_img[np.clip(cy0 + 40, 0, mh - 1), x_start:x_end], x_start),
+            ]
+            # Vertical strips (solve y-phase): fixed x, varying y.
+            v_strips = [
+                (map_img[y_start:y_end, np.clip(cx0 + 45, 0, mw - 1)].reshape(-1, 3), y_start),
+                (map_img[y_start:y_end, np.clip(cx0 - 45, 0, mw - 1)].reshape(-1, 3), y_start),
+            ]
+
+            def collect_boundary_residues(strips, mod_s):
+                residues = []
+                for strip, base_idx in strips:
+                    if strip.size == 0 or len(strip) < 3:
+                        continue
+                    codes = (
+                        (strip[:, 0].astype(np.uint32) << 16)
+                        | (strip[:, 1].astype(np.uint32) << 8)
+                        | strip[:, 2].astype(np.uint32)
+                    )
+                    is_terrain = np.isin(codes, self._terrain_codes_u32, assume_unique=False)
+                    changed = np.any(strip[1:] != strip[:-1], axis=1)
+                    valid = is_terrain[1:] & is_terrain[:-1] & changed
+                    edge_idx = np.flatnonzero(valid) + 1  # local indices
+                    for i in edge_idx.tolist():
+                        abs_i = int(base_idx + i)
+                        residues.append(abs_i % mod_s)
+                return residues
+
+            x_res = collect_boundary_residues(h_strips, s)
+            y_res = collect_boundary_residues(v_strips, s)
+
+            def align_center(c0, residues, mod_s):
+                if not residues:
+                    return int(c0)
+                counts = Counter(residues)
+                boundary_phase = int(max(counts.items(), key=lambda kv: kv[1])[0])
+                center_phase = (boundary_phase + (mod_s // 2)) % mod_s
+                cur_phase = int(c0 % mod_s)
+                delta = center_phase - cur_phase
+                # shortest modular adjustment
+                if delta > (mod_s // 2):
+                    delta -= mod_s
+                elif delta < -(mod_s // 2):
+                    delta += mod_s
+                return int(c0 + delta)
+
+            cx = align_center(cx0, x_res, s)
+            cy = align_center(cy0, y_res, s)
+            return cx, cy
+        except Exception:
+            mh, mw = map_img.shape[:2]
+            return mw // 2, mh // 2
+
+    def _resolve_minimap_sampling_center(self, map_img, S):
+        """Unified minimap sampling center used by collision + visualization."""
+        center_from_cross = self._estimate_player_cross_center(map_img)
+        if center_from_cross is not None:
+            return center_from_cross
+        return self._estimate_grid_center_from_transitions(map_img, S)
+
     def _extract_tile_sets_from_local_data(self, local_data):
         """Returns unwalkable/tp tile sets from 15x11 sampled minimap data."""
         OBS = np.array(BotConstants.OBSTACLES, dtype=np.uint8)
@@ -4322,9 +4460,19 @@ class Bot:
         except Exception:
             pass
         S = int(max(1, self.map_scale))
-        local_data, _cx, _cy, anchor_dx, anchor_dy = self._sample_minimap_grid(map_img, S)
-        self.minimap_grid_anchor_dx = int(anchor_dx)
-        self.minimap_grid_anchor_dy = int(anchor_dy)
+        mh, mw = map_img.shape[:2]
+        cx, cy = self._resolve_minimap_sampling_center(map_img, S)
+        # Revert to direct center-grid sampling (pre-anchor heuristic behavior).
+        local_data = np.zeros((11, 15, 3), dtype=np.uint8)
+        for r in range(11):
+            for c in range(15):
+                px, py = cx + (c - 7) * S, cy + (r - 5) * S
+                if 0 <= px < mw and 0 <= py < mh:
+                    local_data[r, c] = map_img[py, px]
+                else:
+                    local_data[r, c] = [0, 0, 0]
+        self.minimap_grid_anchor_dx = 0
+        self.minimap_grid_anchor_dy = 0
         
         # 1. Prepare Obstacle Data (The Blacklist)
         OBS = np.array(BotConstants.OBSTACLES, dtype=np.uint8)
@@ -4439,7 +4587,16 @@ class Bot:
             map_img = img.screengrab_array(self.hwnd, self.s_Map.region)
             if map_img is not None:
                 s = int(max(1, self.map_scale))
-                local_data, _mcx, _mcy, _dx, _dy = self._sample_minimap_grid(map_img, s)
+                mh, mw = map_img.shape[:2]
+                mcx, mcy = self._resolve_minimap_sampling_center(map_img, s)
+                # Use the same center-based sampling origin as collision extraction.
+                local_data = np.zeros((11, 15, 3), dtype=np.uint8)
+                for gr in range(11):
+                    for gc in range(15):
+                        px = mcx + (gc - 7) * s
+                        py = mcy + (gr - 5) * s
+                        if 0 <= px < mw and 0 <= py < mh:
+                            local_data[gr, gc] = map_img[py, px]
                 yellow_local = self._yellow_mask_bgr(local_data, tol=12)
                 ys, xs = np.where(yellow_local)
                 for gr, gc in zip(ys.tolist(), xs.tolist()):
