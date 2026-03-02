@@ -172,7 +172,9 @@ class Bot:
         self.discovery_mode = True # True until we finish the first complete lap
         self.loop_count = 0
         self.circuit_marks_found = 0
-        self.mark_list = ["skull", "lock", "cross", "star"]
+        # Default cavebot cycle (shared by F11/F12 painter + cave navigation).
+        # 'lock' is intentionally excluded because many routes use only these 3 marks.
+        self.mark_list = ["skull", "cross", "star"]
         self.current_mark_index = 0
         self.current_mark = self.mark_list[0]
         # NEW: Separate index for the manual mark-placer
