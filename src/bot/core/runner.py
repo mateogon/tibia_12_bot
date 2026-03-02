@@ -61,14 +61,17 @@ class BotRunner:
         self.perf.add_span("scale_detect", t0)
 
     def _update_monsters(self) -> None:
-        t0 = time.perf_counter(); self.bot.monster_count = self.bot.monsterCount(); self.perf.add_span("monster_count", t0)
-        if self.bot.monster_count <= 0:
-            return
+        t0 = time.perf_counter(); battle_count = self.bot.monsterCount(); self.perf.add_span("monster_count", t0)
+        self.bot.monster_count_battlelist = int(battle_count)
 
+        # Always refresh on-screen detections; battle-list color scan can miss on some clients.
         t0 = time.perf_counter()
         self.bot.updateMonsterPositions()
         self.bot.monster_positions = self.bot.get_filtered_monsters()
         self.perf.add_span("monster_positions", t0)
+
+        screen_count = len(self.bot.monster_positions)
+        self.bot.monster_count = max(int(battle_count), int(screen_count))
 
     def _update_collision_map_if_needed(self) -> None:
         need_collision = (
