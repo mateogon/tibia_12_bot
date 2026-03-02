@@ -61,7 +61,6 @@ class ModernBotGUI:
             'use_recenter', 'use_kiting',
             'use_magic_shield',
             "use_static_lure",
-            "use_lock_mark",
             "log_cavebot",
             "log_enabled", "log_actions", "log_perf",
         ]
@@ -266,7 +265,6 @@ class ModernBotGUI:
         reset_btn.pack(side="right")
         if self.vocation == "knight":
             self._switch(f_nav, "Static Party Lure (Skull/Lock/etc)", "use_static_lure")
-        self._switch(f_nav, "Use Lock Mark In Cycle", "use_lock_mark")
         self._switch(f_nav, "Cavebot Debug Logs", "log_cavebot")
         # Follow logic (Now correctly placed inside Navigation before other sections start)
         self._switch(f_nav, "Follow Party Leader", "follow_party")
@@ -307,7 +305,7 @@ class ModernBotGUI:
         ).pack(anchor="w", padx=10, pady=2)
         ctk.CTkLabel(
             f_hotkeys,
-            text="Auto cycle order: skull -> cross -> star (+ lock if enabled)",
+            text="Auto cycle order: skull -> lock -> cross -> star",
             text_color="#9FA8DA",
         ).pack(anchor="w", padx=10, pady=(2, 8))
 

@@ -173,7 +173,7 @@ class Bot:
         self.loop_count = 0
         self.circuit_marks_found = 0
         # Default cavebot cycle (shared by F11/F12 painter + cave navigation).
-        self.mark_list = ["skull", "cross", "star"]
+        self.mark_list = ["skull", "lock", "cross", "star"]
         self.current_mark_index = 0
         self.current_mark = self.mark_list[0]
         # NEW: Separate index for the manual mark-placer
@@ -268,7 +268,6 @@ class Bot:
         self.use_static_lure = BooleanVar(value=s.get("use_static_lure", False))
         self.use_recenter = BooleanVar(value=s.get("use_recenter", False))
         self.use_kiting   = BooleanVar(value=s.get("use_kiting", False))
-        self.use_lock_mark = BooleanVar(value=s.get("use_lock_mark", False))
         self.log_cavebot      = BooleanVar(value=s.get("log_cavebot", False))
         self.follow_party     = BooleanVar(value=s.get("follow_party", False))
         self.manual_loot      = BooleanVar(value=s.get("manual_loot", False))
@@ -325,9 +324,7 @@ class Bot:
         configure_action_logging(enabled=enabled, include_caller=True)
 
     def _desired_mark_cycle(self):
-        if self._bool_value(getattr(self, "use_lock_mark", False)):
-            return ["skull", "lock", "cross", "star"]
-        return ["skull", "cross", "star"]
+        return ["skull", "lock", "cross", "star"]
 
     def _sync_mark_cycle(self, force_reset=False):
         desired = self._desired_mark_cycle()
