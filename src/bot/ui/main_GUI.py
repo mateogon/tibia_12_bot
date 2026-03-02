@@ -34,6 +34,8 @@ class ModernBotGUI:
         self._rec_status_timer_id = None
         self.record_btn = None
         self.rec_status_label = None
+        self.zoom_record_btn = None
+        self.zoom_rec_status_label = None
 
 
         # Start Loops
@@ -66,7 +68,9 @@ class ModernBotGUI:
             "use_static_lure",
             "log_cavebot",
             "log_battlelist",
+            "visualize_battlelist",
             "cavebot_record_interval_ms",
+            "cavebot_record_zoom_label",
             "log_enabled", "log_actions", "log_perf",
         ]
         
@@ -332,6 +336,7 @@ class ModernBotGUI:
         self._switch(f_logs, "Action Click Logs", "log_actions")
         self._switch(f_logs, "Performance Logs", "log_perf")
         self._switch(f_logs, "Battle List Logs", "log_battlelist")
+        self._switch(f_logs, "Battle List Visual Debug", "visualize_battlelist")
 
         f_lab = self._create_section(parent, "Cavebot Debug Lab")
         self.record_btn = ctk.CTkButton(
@@ -355,6 +360,30 @@ class ModernBotGUI:
             fg_color="#3E5A1B",
             hover_color="#5A7A26",
         ).pack(fill="x", padx=10, pady=4)
+        self.zoom_record_btn = ctk.CTkButton(
+            f_lab,
+            text="Start Auto Zoom Capture (x1/x2/x4)",
+            command=self._toggle_minimap_zoom_recording_with_ui,
+            fg_color="#1F4D7A",
+            hover_color="#2A679F",
+        )
+        self.zoom_record_btn.pack(fill="x", padx=10, pady=(4, 4))
+        self.zoom_rec_status_label = ctk.CTkLabel(
+            f_lab,
+            text="Zoom Capture: OFF",
+            text_color="#D16A6A",
+        )
+        self.zoom_rec_status_label.pack(anchor="w", padx=10, pady=(0, 4))
+        ctk.CTkLabel(
+            f_lab,
+            text="Flow: click Start -> switch Tibia zooms (any order) -> auto-stop after x1/x2/x4.",
+            text_color="#9FA8DA",
+        ).pack(anchor="w", padx=10, pady=(0, 6))
+        ctk.CTkLabel(
+            f_lab,
+            text="Zoom output: training_data/minimap_zoom_sets/<session>/",
+            text_color="#9FA8DA",
+        ).pack(anchor="w", padx=10, pady=(0, 6))
         goal_row = ctk.CTkFrame(f_lab, fg_color="transparent")
         goal_row.pack(fill="x", padx=10, pady=4)
         ctk.CTkLabel(goal_row, text="Manual Goal Mark:", width=130, anchor="w").pack(side="left")
@@ -372,6 +401,24 @@ class ModernBotGUI:
             command=lambda: self.bot.set_debug_goal_mark(self.debug_goal_var.get()),
         ).pack(side="left")
         self._entry_row(f_lab, "Record interval ms:", "cavebot_record_interval_ms")
+        zoom_row = ctk.CTkFrame(f_lab, fg_color="transparent")
+        zoom_row.pack(fill="x", padx=10, pady=4)
+        ctk.CTkLabel(zoom_row, text="Zoom label:", width=130, anchor="w").pack(side="left")
+        self.debug_zoom_label_var = ctk.StringVar(
+            value=str(getattr(self.bot.cavebot_record_zoom_label, "get", lambda: 0)())
+        )
+        ctk.CTkOptionMenu(
+            zoom_row,
+            values=["0", "1", "2", "4"],
+            variable=self.debug_zoom_label_var,
+            width=110,
+            command=lambda v: self.bot.cavebot_record_zoom_label.set(int(v)),
+        ).pack(side="left", padx=6)
+        ctk.CTkLabel(
+            zoom_row,
+            text="0=auto",
+            text_color="#9FA8DA",
+        ).pack(side="left")
         ctk.CTkLabel(
             f_lab,
             text="Output: training_data/cavebot_sessions/<session>/",
@@ -543,6 +590,7 @@ class ModernBotGUI:
             "min_monsters_spell", "min_monsters_rune",
             "kill_amount", "kill_stop_amount",
             "lure_walk_ms", "lure_stop_ms",
+            "cavebot_record_interval_ms", "cavebot_record_zoom_label",
         }
 
         # 2) Sync GUI vars -> profile["settings"]
@@ -638,6 +686,10 @@ class ModernBotGUI:
         self.bot.toggle_cavebot_recording()
         self._update_recording_indicator()
 
+    def _toggle_minimap_zoom_recording_with_ui(self):
+        self.bot.toggle_minimap_zoom_recording()
+        self._update_recording_indicator()
+
     def _update_recording_indicator(self):
         is_on = False
         try:
@@ -653,6 +705,21 @@ class ModernBotGUI:
             self.record_btn.configure(
                 text="Stop Cavebot Recording" if is_on else "Start Cavebot Recording",
                 fg_color="#6B2E2E" if is_on else "#5A3E1B",
+            )
+        zoom_on = False
+        try:
+            zoom_on = bool(self.bot.is_minimap_zoom_recording())
+        except Exception:
+            zoom_on = False
+        if self.zoom_rec_status_label is not None:
+            self.zoom_rec_status_label.configure(
+                text="Zoom Capture: ON" if zoom_on else "Zoom Capture: OFF",
+                text_color="#5FD17A" if zoom_on else "#D16A6A",
+            )
+        if self.zoom_record_btn is not None:
+            self.zoom_record_btn.configure(
+                text="Stop Auto Zoom Capture" if zoom_on else "Start Auto Zoom Capture (x1/x2/x4)",
+                fg_color="#6B2E2E" if zoom_on else "#1F4D7A",
             )
         if self.running:
             self._rec_status_timer_id = self.root.after(300, self._update_recording_indicator)

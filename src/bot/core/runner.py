@@ -50,13 +50,18 @@ class BotRunner:
             t0 = time.perf_counter(); self.bot.lootAround(True); self.perf.add_span("loot_on_spot", t0)
 
     def _update_minimap_scale(self) -> None:
-        if self.count % 30 != 0:
+        detect_every = 1 if bool(getattr(self.bot, "minimap_zoom_recording", False)) else 30
+        if self.count % detect_every != 0:
             return
 
         from src.bot.vision import image as img
 
         t0 = time.perf_counter()
         map_img = img.screengrab_array(self.bot.hwnd, self.bot.s_Map.region)
+        self.perf.add_span("minimap_capture", t0)
+        if map_img is None:
+            return
+        t0 = time.perf_counter()
         self.bot.map_scale = self.bot.detect_minimap_scale(map_img)
         self.perf.add_span("scale_detect", t0)
 
@@ -136,6 +141,8 @@ class BotRunner:
     def _visualize(self) -> None:
         if self.bot._bool_value(self.bot.show_area_rune_target) and self.count % 3 == 0:
             t0 = time.perf_counter(); self.bot.visualize_monster_grid(self.bot.collision_grid, self.bot.map_scale); self.perf.add_span("visualize", t0)
+        if self.bot._bool_value(getattr(self.bot, "visualize_battlelist", False)) and self.count % 2 == 0:
+            t0 = time.perf_counter(); self.bot.visualize_battlelist_debug(); self.perf.add_span("battlelist_vis", t0)
 
     def run(self):
         self.bot.updateFrame()
@@ -162,6 +169,7 @@ class BotRunner:
 
                 self._periodic_actionbar_and_loot()
                 self._update_minimap_scale()
+                t0 = time.perf_counter(); self.bot.record_minimap_zoom_tick(); self.perf.add_span("zoom_capture", t0)
                 t0 = time.perf_counter(); self.bot.record_cavebot_tick(); self.perf.add_span("cavebot_rec", t0)
                 self._update_monsters()
                 self._update_collision_map_if_needed()

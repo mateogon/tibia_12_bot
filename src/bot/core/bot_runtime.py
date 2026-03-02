@@ -84,6 +84,7 @@ class Bot:
         # PrintWindow is expensive; cap capture rate to reduce frame-stall pressure.
         self.bg = BackgroundFrameGrabber(self.hwnd, max_fps=25)
         self.bg.start()
+        self._lock_window_resizing()
         
         if self.character_name is None:
             print("You are not logged in.")
@@ -98,6 +99,30 @@ class Bot:
         self.low_hp_colors = BotConstants.LOW_HP_COLORS
         self.party_colors = BotConstants.PARTY_COLORS
         self.party_colors_current = "cross"
+
+    def _lock_window_resizing(self):
+        """Disable manual resizing while allowing window movement."""
+        try:
+            style = win32gui.GetWindowLong(self.hwnd, win32con.GWL_STYLE)
+            new_style = style & ~win32con.WS_THICKFRAME & ~win32con.WS_MAXIMIZEBOX
+            if new_style != style:
+                win32gui.SetWindowLong(self.hwnd, win32con.GWL_STYLE, new_style)
+                win32gui.SetWindowPos(
+                    self.hwnd,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    win32con.SWP_NOMOVE
+                    | win32con.SWP_NOSIZE
+                    | win32con.SWP_NOZORDER
+                    | win32con.SWP_NOACTIVATE
+                    | win32con.SWP_FRAMECHANGED,
+                )
+                print("[WINDOW] Resize handles disabled (move allowed).")
+        except Exception as e:
+            print(f"[WINDOW] Could not lock resize: {e}")
 
     def _init_screen_elements(self):
         # Base Elements
@@ -152,6 +177,7 @@ class Bot:
         self.buffs = {}
         self.last_attack_time = timeInMillis()
         self.last_attack_click_ms = 0
+        self.attack_recheck_delay_ms = 100
         self.attack_acquire_grace_until_ms = 0
         self.last_force_attack_request_ms = 0
         self.slot_status = [False] * 32
@@ -215,6 +241,12 @@ class Bot:
         self.equip_state_since_ms = 0
         self.equip_last_click_by_slot = {}
         self.next_mark_eligible_ms = 0
+        # Cavebot progression tuning (from offline replay harness).
+        self.cavebot_arrival_threshold_px = 4.0
+        self.cavebot_arrival_confirm_frames = 2
+        self.cavebot_immediate_advance_px = 1.0
+        self.cavebot_arrival_streak = 0
+        self.cavebot_arrival_last_mark = None
         self.last_cavebot_reset_ms = 0
         self.last_mark_scan_log_ms = 0
         self.last_mark_scan_info = {}
@@ -224,10 +256,25 @@ class Bot:
         self.cavebot_record_frame_idx = 0
         self.cavebot_record_last_ms = 0
         self.cavebot_record_interval_default_ms = 120
+        self.cavebot_record_zoom_label_default = 0
         self.cavebot_record_pending_mark = None
         self.cavebot_record_pending_rows = []
         self.cavebot_record_last_map_small = None
+        self.minimap_zoom_recording = False
+        self.minimap_zoom_session_dir = None
+        self.minimap_zoom_target_scales = [1, 2, 4]
+        self.minimap_zoom_captured = {}
+        self.minimap_zoom_captured_order = []
+        self.minimap_zoom_last_capture_ms = 0
+        self.minimap_zoom_stable_scale = None
+        self.minimap_zoom_stable_frames = 0
+        self.minimap_zoom_required_stable_frames = 3
+        self.minimap_zoom_true_tiles = {"unwalkable": [], "tp": []}
+        self.visualize_pause_until_ms = 0
+        self.visualize_window_alive = False
         self.last_battlelist_log_ms = 0
+        self.battlelist_visualize_window_alive = False
+        self.battlelist_debug_last_scan = {}
         self.amp_res_stagnation_start_ms = 0
         self.amp_res_prev_far_avg_dist = None
         self.amp_res_prev_update_ms = 0
@@ -281,7 +328,9 @@ class Bot:
         self.use_kiting   = BooleanVar(value=s.get("use_kiting", False))
         self.log_cavebot      = BooleanVar(value=s.get("log_cavebot", False))
         self.log_battlelist   = BooleanVar(value=s.get("log_battlelist", False))
+        self.visualize_battlelist = BooleanVar(value=s.get("visualize_battlelist", False))
         self.cavebot_record_interval_ms = IntVar(value=int(s.get("cavebot_record_interval_ms", 120)))
+        self.cavebot_record_zoom_label = IntVar(value=int(s.get("cavebot_record_zoom_label", 0)))
         self.follow_party     = BooleanVar(value=s.get("follow_party", False))
         self.manual_loot      = BooleanVar(value=s.get("manual_loot", False))
         self.loot_on_spot     = BooleanVar(value=s.get("loot_on_spot", False))
@@ -394,7 +443,8 @@ class Bot:
         self.cavebot_record_pending_rows = []
         self.cavebot_record_last_map_small = None
         self.cavebot_recording = True
-        print(f"[CAVEBOT REC] recording started: {base}")
+        zoom_lbl = int(self.cavebot_record_zoom_label.get()) if hasattr(self.cavebot_record_zoom_label, "get") else 0
+        print(f"[CAVEBOT REC] recording started: {base} (zoom_label={zoom_lbl or 'auto'})")
 
     def stop_cavebot_recording(self):
         if not self.cavebot_recording:
@@ -433,10 +483,29 @@ class Bot:
 
         # Save only when minimap changed (unless forced snapshot/start marker).
         small = cv2.resize(map_img, (48, 48), interpolation=cv2.INTER_AREA)
-        if not force and self.cavebot_record_last_map_small is not None:
-            delta = float(np.mean(cv2.absdiff(small, self.cavebot_record_last_map_small)))
-            if delta < 0.8:
+        map_delta = None
+        move_dx = 0.0
+        move_dy = 0.0
+        moved_px = 0.0
+        move_confidence = 0.0
+        move_method = "none"
+        if self.cavebot_record_last_map_small is not None:
+            map_delta = float(np.mean(cv2.absdiff(small, self.cavebot_record_last_map_small)))
+            if not force and map_delta < 0.8:
                 return
+            try:
+                move_dx, move_dy, move_confidence, move_method, motion_valid, motion_reason = self._estimate_minimap_motion(
+                    self.cavebot_record_last_map_small,
+                    small,
+                    map_delta=map_delta,
+                )
+                moved_px = float((move_dx * move_dx + move_dy * move_dy) ** 0.5)
+            except Exception:
+                motion_valid = False
+                motion_reason = "error"
+        else:
+            motion_valid = False
+            motion_reason = "first_frame"
 
         self.cavebot_record_frame_idx += 1
         self.cavebot_record_last_ms = now_ms
@@ -454,6 +523,19 @@ class Bot:
             nearest_dist = float(marks[0][0])
             nearest_rel = [int(marks[0][2][0]), int(marks[0][2][1])]
 
+        zoom_label = 0
+        if hasattr(self.cavebot_record_zoom_label, "get"):
+            try:
+                zoom_label = int(self.cavebot_record_zoom_label.get())
+            except Exception:
+                zoom_label = 0
+        if zoom_label in (1, 2, 4):
+            zoom_label_source = "manual"
+            zoom_label_value = zoom_label
+        else:
+            zoom_label_source = "auto"
+            zoom_label_value = int(getattr(self, "map_scale", 2))
+
         rec = {
             "ts_ms": int(now_ms),
             "event": event,
@@ -466,6 +548,17 @@ class Bot:
             "scan": dict(getattr(self, "last_mark_scan_info", {})),
             "nearest_dist": nearest_dist,
             "nearest_rel": nearest_rel,
+            "map_scale": int(getattr(self, "map_scale", 2)),
+            "zoom_label": int(zoom_label_value),
+            "zoom_label_source": zoom_label_source,
+            "map_delta": map_delta,
+            "move_dx": move_dx,
+            "move_dy": move_dy,
+            "moved_px": moved_px,
+            "move_confidence": move_confidence,
+            "move_method": move_method,
+            "motion_valid": bool(motion_valid),
+            "motion_reason": motion_reason,
         }
         if self.cavebot_record_pending_mark is None:
             self.cavebot_record_pending_mark = self.current_mark
@@ -473,6 +566,53 @@ class Bot:
             self._flush_cavebot_record_segment(reason="mark_change", next_mark=self.current_mark)
             self.cavebot_record_pending_mark = self.current_mark
         self.cavebot_record_pending_rows.append(rec)
+
+    def _estimate_minimap_motion(self, prev_bgr, curr_bgr, max_shift=8, map_delta=None):
+        """
+        Estimate minimap movement between frames.
+        Primary: center template matching (very accurate in offline benchmarks).
+        Fallback: phase correlation if template confidence is weak/out-of-range.
+        Returns (dx, dy, confidence, method, valid, reason).
+        """
+        # Light discontinuity guard for floor-jump/teleport-style minimap changes.
+        likely_discontinuity = bool(map_delta is not None and float(map_delta) >= 30.0)
+        try:
+            prev_g = cv2.cvtColor(prev_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            curr_g = cv2.cvtColor(curr_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            h, w = prev_g.shape[:2]
+            m = int(max(2, min(max_shift, h // 4, w // 4)))
+            templ = prev_g[m : h - m, m : w - m]
+            if templ.size > 0:
+                res = cv2.matchTemplate(curr_g, templ, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, max_loc = cv2.minMaxLoc(res)
+                dx = float(max_loc[0] - m)
+                dy = float(max_loc[1] - m)
+                # Keep template result only when it is plausible and confident.
+                if abs(dx) <= (max_shift + 1) and abs(dy) <= (max_shift + 1):
+                    conf = float(max_val)
+                    # Keep pure template as default; only invalidate obvious jump frames.
+                    if likely_discontinuity and conf < 0.65:
+                        return 0.0, 0.0, conf, "template_center", False, "discontinuity_low_template_conf"
+                    if conf >= 0.55:
+                        return dx, dy, conf, "template_center", True, "template_ok"
+        except Exception:
+            pass
+
+        # Fallback path (rare): only if template fails outside discontinuity handling.
+        try:
+            prev_g = cv2.cvtColor(prev_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            curr_g = cv2.cvtColor(curr_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            shift, response = cv2.phaseCorrelate(prev_g, curr_g)
+            dx = float(shift[0])
+            dy = float(shift[1])
+            conf = float(response)
+            if likely_discontinuity:
+                return 0.0, 0.0, conf, "phase_gray", False, "discontinuity_template_failed"
+            if abs(dx) > (max_shift * 1.8) or abs(dy) > (max_shift * 1.8):
+                return 0.0, 0.0, conf, "phase_gray", False, "shift_out_of_range"
+            return dx, dy, conf, "phase_gray", True, "phase_ok"
+        except Exception:
+            return 0.0, 0.0, 0.0, "none", False, "estimate_failed"
 
     def _flush_cavebot_record_segment(self, reason="flush", next_mark=None):
         if not self.cavebot_record_trace_fp or not self.cavebot_record_pending_rows:
@@ -531,6 +671,128 @@ class Bot:
     def is_cavebot_recording(self):
         return bool(self.cavebot_recording)
 
+    def _ensure_minimap_zoom_recording_dir(self, session_name=None):
+        if not session_name:
+            session_name = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        base = os.path.join(self.base_directory, "training_data", "minimap_zoom_sets", session_name)
+        os.makedirs(base, exist_ok=True)
+        return base
+
+    def start_minimap_zoom_recording(self, session_name=None):
+        if self.minimap_zoom_recording:
+            return
+        base = self._ensure_minimap_zoom_recording_dir(session_name=session_name)
+        self.minimap_zoom_session_dir = base
+        self.minimap_zoom_captured = {}
+        self.minimap_zoom_captured_order = []
+        self.minimap_zoom_last_capture_ms = 0
+        self.minimap_zoom_stable_scale = None
+        self.minimap_zoom_stable_frames = 0
+        self.minimap_zoom_true_tiles = {"unwalkable": [], "tp": []}
+        self.minimap_zoom_recording = True
+        targets = ",".join(str(v) for v in self.minimap_zoom_target_scales)
+        print(f"[ZOOM CAPTURE] started: {base} (targets={targets})")
+
+    def stop_minimap_zoom_recording(self, reason="manual_stop"):
+        if not self.minimap_zoom_recording:
+            return
+        self.minimap_zoom_recording = False
+        base = self.minimap_zoom_session_dir
+        if base:
+            scales_out = {}
+            for s, info in sorted(self.minimap_zoom_captured.items()):
+                scales_out[str(int(s))] = {
+                    "frame": info.get("frame"),
+                    "ts_ms": int(info.get("ts_ms", 0)),
+                    "anchor_dx": int(info.get("anchor_dx", 0)),
+                    "anchor_dy": int(info.get("anchor_dy", 0)),
+                    "unwalkable": info.get("unwalkable", []),
+                    "tp": info.get("tp", []),
+                }
+            meta = {
+                "session_type": "minimap_zoom_set",
+                "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
+                "reason": str(reason),
+                "target_scales": list(self.minimap_zoom_target_scales),
+                "captured_order": [int(v) for v in self.minimap_zoom_captured_order],
+                "x4_truth": dict(self.minimap_zoom_true_tiles),
+                "scales": scales_out,
+            }
+            try:
+                meta_path = os.path.join(base, "metadata.json")
+                with open(meta_path, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, ensure_ascii=True, indent=2)
+            except Exception as e:
+                print(f"[ZOOM CAPTURE] metadata write failed: {e}")
+        captured = sorted(self.minimap_zoom_captured.keys())
+        print(f"[ZOOM CAPTURE] stopped: reason={reason} captured={captured}")
+
+    def toggle_minimap_zoom_recording(self):
+        if self.minimap_zoom_recording:
+            self.stop_minimap_zoom_recording(reason="manual_stop")
+        else:
+            self.start_minimap_zoom_recording()
+
+    def is_minimap_zoom_recording(self):
+        return bool(self.minimap_zoom_recording)
+
+    def record_minimap_zoom_tick(self):
+        if not self.minimap_zoom_recording:
+            return
+        now_ms = timeInMillis()
+        scale = int(max(1, getattr(self, "map_scale", 2)))
+        if scale == int(self.minimap_zoom_stable_scale or -1):
+            self.minimap_zoom_stable_frames += 1
+        else:
+            self.minimap_zoom_stable_scale = scale
+            self.minimap_zoom_stable_frames = 1
+
+        if scale not in self.minimap_zoom_target_scales:
+            return
+        if scale in self.minimap_zoom_captured:
+            if all(s in self.minimap_zoom_captured for s in self.minimap_zoom_target_scales):
+                self.stop_minimap_zoom_recording(reason="all_scales_captured")
+            return
+        if self.minimap_zoom_stable_frames < int(max(1, self.minimap_zoom_required_stable_frames)):
+            return
+        if (now_ms - self.minimap_zoom_last_capture_ms) < 220:
+            return
+
+        map_img = img.screengrab_array(self.hwnd, self.s_Map.region)
+        if map_img is None:
+            return
+        if not self.minimap_zoom_session_dir:
+            return
+
+        frame_name = f"zoom_x{scale}.png"
+        frame_path = os.path.join(self.minimap_zoom_session_dir, frame_name)
+        try:
+            cv2.imwrite(frame_path, map_img)
+        except Exception:
+            return
+
+        tile_info = self._extract_tile_sets_from_map(map_img, scale)
+        tile_info["frame"] = frame_name
+        tile_info["ts_ms"] = int(now_ms)
+        self.minimap_zoom_captured[int(scale)] = tile_info
+        self.minimap_zoom_captured_order.append(int(scale))
+        self.minimap_zoom_last_capture_ms = now_ms
+
+        if int(scale) == 4:
+            self.minimap_zoom_true_tiles = {
+                "unwalkable": list(tile_info.get("unwalkable", [])),
+                "tp": list(tile_info.get("tp", [])),
+            }
+
+        print(
+            f"[ZOOM CAPTURE] saved x{scale} ({frame_name}) "
+            f"stable_frames={self.minimap_zoom_stable_frames} "
+            f"tiles: unwalkable={len(tile_info.get('unwalkable', []))} tp={len(tile_info.get('tp', []))}"
+        )
+
+        if all(s in self.minimap_zoom_captured for s in self.minimap_zoom_target_scales):
+            self.stop_minimap_zoom_recording(reason="all_scales_captured")
+
     def _visualize_area_rune_target(self, rel_x, rel_y, neighbors_rel=None, radius_px=None):
         if not self._bool_value(self.show_area_rune_target):
             return
@@ -574,6 +836,20 @@ class Bot:
             self.left, self.top, self.right, self.bottom = l, t, r, b
             self.height = abs(self.bottom - self.top)
             self.width = abs(self.right - self.left)
+            # HighGUI can become unstable while dragging/resizing; pause debug draw briefly.
+            self.visualize_pause_until_ms = timeInMillis() + 900
+            if self.visualize_window_alive:
+                try:
+                    cv2.destroyWindow("AI Spatial Vision")
+                except Exception:
+                    pass
+                self.visualize_window_alive = False
+            if self.battlelist_visualize_window_alive:
+                try:
+                    cv2.destroyWindow("Battle List Debug")
+                except Exception:
+                    pass
+                self.battlelist_visualize_window_alive = False
             self.bg._refresh_crop()
             self.updateAllElements()
             self.getPartyList()
@@ -581,6 +857,19 @@ class Bot:
             # 2. Internal Game View Resize (Use our new debounced check)
             if self.checkGameScreenMoved():
                 print("Game view internal resize confirmed. Updating bound elements...")
+                self.visualize_pause_until_ms = timeInMillis() + 900
+                if self.visualize_window_alive:
+                    try:
+                        cv2.destroyWindow("AI Spatial Vision")
+                    except Exception:
+                        pass
+                    self.visualize_window_alive = False
+                if self.battlelist_visualize_window_alive:
+                    try:
+                        cv2.destroyWindow("Battle List Debug")
+                    except Exception:
+                        pass
+                    self.battlelist_visualize_window_alive = False
                 self.updateBoundElements()
                 
     def getCharacterName(self):
@@ -1570,18 +1859,29 @@ class Bot:
 
         now_ms = timeInMillis()
 
-        # After sending an attack click, give the client a short window to show attack state
-        # before issuing another target click (prevents oscillation/spam).
+        # After sending an attack click, always give the client a short fixed window
+        # before re-checking attack state (prevents rapid oscillation on slower servers/themes).
         if now_ms < self.attack_acquire_grace_until_ms:
-            if self.isAttacking():
-                self.attack_acquire_grace_until_ms = 0
-            else:
-                return
+            return
+
+        is_knight = ((self.vocation or "").lower() == "knight")
+        attacked_row_idx = None
+        attacked_rel_y = None
+        if is_knight:
+            attacked_row_idx, attacked_rel_y = self.get_attacked_battlelist_row()
 
         # Only check delay if we are NOT forcing the attack
         if not force:
-            if self.isAttacking() or not self.delays.due("attack_click"):
+            if not self.delays.due("attack_click"):
                 return
+            if self.isAttacking():
+                # Knight policy: keep attacking only if current target is already first row.
+                if is_knight:
+                    if attacked_row_idx == 0:
+                        return
+                    # If attacked row is not first (or unknown), keep going and retarget.
+                else:
+                    return
         else:
             # Even forced reacquire should respect a tiny hard floor between clicks.
             if (now_ms - self.last_attack_click_ms) < 220:
@@ -1598,6 +1898,20 @@ class Bot:
         height, width, _ = image.shape
         # Keep these aligned with monsterCount() scanline constants.
         rel_x, start_y, step_y = 25, 31, 22
+        debug_rows = []
+        selected_rel_y = None
+
+        for rel_y in range(start_y, height, step_y):
+            if rel_y >= height or rel_x >= width:
+                break
+            p = image[rel_y, rel_x]
+            debug_rows.append(
+                {
+                    "rel_y": int(rel_y),
+                    "bgr": (int(p[0]), int(p[1]), int(p[2])),
+                    "black": bool(p[0] == 0 and p[1] == 0 and p[2] == 0),
+                }
+            )
 
         # Knights should prioritize the first battle-list row (closest target).
         if (self.vocation or "").lower() == "knight":
@@ -1605,10 +1919,27 @@ class Bot:
                 first_pixel = image[start_y, rel_x]
                 if first_pixel[0] == 0 and first_pixel[1] == 0 and first_pixel[2] == 0:
                     abs_x, abs_y = region[0] + rel_x, region[1] + start_y
+                    selected_rel_y = int(start_y)
+                    self.battlelist_debug_last_scan = {
+                        "region": tuple(region),
+                        "rel_x": int(rel_x),
+                        "attack_rel_x": 3,
+                        "start_y": int(start_y),
+                        "step_y": int(step_y),
+                        "height": int(height),
+                        "width": int(width),
+                        "rows": debug_rows,
+                        "attacked_row_idx": attacked_row_idx,
+                        "attacked_rel_y": attacked_rel_y,
+                        "selected_rel_y": selected_rel_y,
+                        "source": "knight_first_row",
+                        "force": bool(force),
+                        "monster_count": int(getattr(self, "monster_count", 0)),
+                    }
                     click_client(self.hwnd, abs_x, abs_y)
                     self.delays.trigger("attack_click")
                     self.last_attack_click_ms = now_ms
-                    self.attack_acquire_grace_until_ms = now_ms + 300
+                    self.attack_acquire_grace_until_ms = now_ms + self.attack_recheck_delay_ms
                     if force:
                         self.last_force_attack_request_ms = now_ms
                     return
@@ -1619,10 +1950,27 @@ class Bot:
 
             if pixel[0] == 0 and pixel[1] == 0 and pixel[2] == 0:
                 abs_x, abs_y = region[0] + rel_x, region[1] + rel_y
+                selected_rel_y = int(rel_y)
+                self.battlelist_debug_last_scan = {
+                    "region": tuple(region),
+                    "rel_x": int(rel_x),
+                    "attack_rel_x": 3,
+                    "start_y": int(start_y),
+                    "step_y": int(step_y),
+                    "height": int(height),
+                    "width": int(width),
+                    "rows": debug_rows,
+                    "attacked_row_idx": attacked_row_idx,
+                    "attacked_rel_y": attacked_rel_y,
+                    "selected_rel_y": selected_rel_y,
+                    "source": "first_black_row_scan",
+                    "force": bool(force),
+                    "monster_count": int(getattr(self, "monster_count", 0)),
+                }
                 click_client(self.hwnd, abs_x, abs_y)
                 self.delays.trigger("attack_click")
                 self.last_attack_click_ms = now_ms
-                self.attack_acquire_grace_until_ms = now_ms + 300
+                self.attack_acquire_grace_until_ms = now_ms + self.attack_recheck_delay_ms
                 if force:
                     self.last_force_attack_request_ms = now_ms
                 return
@@ -1641,6 +1989,140 @@ class Bot:
             f"region={region} samples={' | '.join(samples)}",
             throttle_ms=500,
         )
+        self.battlelist_debug_last_scan = {
+            "region": tuple(region),
+            "rel_x": int(rel_x),
+            "attack_rel_x": 3,
+            "start_y": int(start_y),
+            "step_y": int(step_y),
+            "height": int(height),
+            "width": int(width),
+            "rows": debug_rows,
+            "attacked_row_idx": attacked_row_idx,
+            "attacked_rel_y": attacked_rel_y,
+            "selected_rel_y": None,
+            "source": "no_target",
+            "force": bool(force),
+            "monster_count": int(getattr(self, "monster_count", 0)),
+        }
+
+    def get_attacked_battlelist_row(self):
+        """
+        Returns (row_idx, rel_y) of current attacked target marker in battle list.
+        Marker is the red/highlight-red strip on the left side.
+        """
+        region = self.s_BattleList.region
+        image = img.screengrab_array(self.hwnd, region)
+        if image is None:
+            return None, None
+
+        height, width = image.shape[:2]
+        rel_x = 3
+        start_y, step_y = 31, 22
+        if rel_x >= width:
+            return None, None
+
+        for row_idx, rel_y in enumerate(range(start_y, height, step_y)):
+            p = image[rel_y, rel_x]
+            # BGR red marker variants.
+            if (p[2] == 255) and (p[1] in (0, 128)):
+                return int(row_idx), int(rel_y)
+        return None, None
+
+    def visualize_battlelist_debug(self):
+        """
+        Real-time debug view for battle-list target scan.
+        Draws scan rows, sampled pixel colors, and selected click row.
+        """
+        try:
+            if timeInMillis() < int(getattr(self, "visualize_pause_until_ms", 0)):
+                return
+            if not self._bool_value(getattr(self, "visualize_battlelist", False)):
+                if self.battlelist_visualize_window_alive:
+                    try:
+                        cv2.destroyWindow("Battle List Debug")
+                    except Exception:
+                        pass
+                    self.battlelist_visualize_window_alive = False
+                return
+
+            region = self.s_BattleList.region
+            frame = img.screengrab_array(self.hwnd, region)
+            if frame is None:
+                return
+            vis = np.ascontiguousarray(frame, dtype=np.uint8)
+
+            dbg = dict(getattr(self, "battlelist_debug_last_scan", {}) or {})
+            rel_x = int(dbg.get("rel_x", 25))
+            attack_rel_x = int(dbg.get("attack_rel_x", 3))
+            start_y = int(dbg.get("start_y", 31))
+            step_y = int(dbg.get("step_y", 22))
+            selected_rel_y = dbg.get("selected_rel_y", None)
+            attacked_row_idx = dbg.get("attacked_row_idx", None)
+            attacked_rel_y = dbg.get("attacked_rel_y", None)
+            rows = dbg.get("rows", [])
+
+            # Vertical scanline
+            cv2.line(vis, (rel_x, 0), (rel_x, vis.shape[0] - 1), (255, 180, 0), 1)
+            cv2.line(vis, (attack_rel_x, 0), (attack_rel_x, vis.shape[0] - 1), (180, 0, 255), 1)
+
+            # Draw sampled rows; green=valid black target pixel, red=non-target.
+            if rows:
+                for i, row in enumerate(rows[:20]):
+                    y = int(row.get("rel_y", start_y + i * step_y))
+                    if y < 0 or y >= vis.shape[0]:
+                        continue
+                    b, g, r = row.get("bgr", (0, 0, 0))
+                    is_black = bool(row.get("black", False))
+                    color = (0, 255, 0) if is_black else (0, 0, 255)
+                    rad = 4 if is_black else 3
+                    cv2.circle(vis, (rel_x, y), rad, color, -1)
+                    cv2.putText(
+                        vis,
+                        f"r{i} y={y} bgr=({b},{g},{r})",
+                        (min(rel_x + 12, vis.shape[1] - 180), max(10, y - 2)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.35,
+                        color,
+                        1,
+                    )
+            else:
+                for i, y in enumerate(range(start_y, vis.shape[0], step_y)):
+                    color = (255, 255, 0) if i == 0 else (120, 120, 120)
+                    cv2.circle(vis, (rel_x, y), 2, color, -1)
+
+            # Highlight first row and selected row.
+            if 0 <= start_y < vis.shape[0]:
+                cv2.line(vis, (0, start_y), (vis.shape[1] - 1, start_y), (0, 255, 255), 1)
+            if selected_rel_y is not None and 0 <= int(selected_rel_y) < vis.shape[0]:
+                y = int(selected_rel_y)
+                cv2.line(vis, (0, y), (vis.shape[1] - 1, y), (255, 255, 0), 2)
+            if attacked_rel_y is not None and 0 <= int(attacked_rel_y) < vis.shape[0]:
+                y = int(attacked_rel_y)
+                cv2.circle(vis, (attack_rel_x, y), 5, (255, 0, 255), -1)
+                cv2.line(vis, (0, y), (vis.shape[1] - 1, y), (255, 0, 255), 1)
+
+            source = str(dbg.get("source", "n/a"))
+            mc = int(dbg.get("monster_count", getattr(self, "monster_count", 0)))
+            atk = int(bool(self.isAttacking()))
+            voc = (self.vocation or "").lower()
+            cv2.putText(vis, f"voc={voc} monsters={mc} attacking={atk}", (5, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1)
+            cv2.putText(vis, f"scan x={rel_x} y0={start_y} step={step_y} src={source}", (5, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (180, 255, 180), 1)
+            cv2.putText(
+                vis,
+                f"attacked_row={attacked_row_idx if attacked_row_idx is not None else 'none'}",
+                (5, 46),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.42,
+                (255, 180, 255),
+                1,
+            )
+
+            cv2.imshow("Battle List Debug", vis)
+            cv2.waitKey(1)
+            self.battlelist_visualize_window_alive = True
+        except Exception:
+            pass
 
     def stopAttacking(self):
         b_x, b_y,_,b_y2 = self.s_BattleList.region
@@ -1730,8 +2212,14 @@ class Bot:
             self.last_monster_detection_debug_image = None
             return
 
-        # 2. Run the detection (Returns feet coordinates + debug image)
-        raw_positions, debug_image = dm.detect_monsters(image, return_debug=True)
+        # 2. Run detection in fast mode by default.
+        # Build debug image only when explicitly requested.
+        need_debug = bool(test)
+        if need_debug:
+            raw_positions, debug_image = dm.detect_monsters(image, return_debug=True)
+        else:
+            raw_positions = dm.detect_monsters(image, return_debug=False)
+            debug_image = None
         
         monster_positions = []
         
@@ -1739,33 +2227,35 @@ class Bot:
         # We assume Party Detection uses Sprite Center (Feet).
         # Our new detection ALSO targets Feet.
         # So we can use a tight distance check.
-        for (mx, my) in raw_positions:
-            is_party = False
-            for player in self.party_positions:
-                px, py = player[0] 
-                
-                # Simple distance check between feet
-                dist = sqrt((px - mx)**2 + (py - my)**2)
-                
-                if dist < 45: 
-                    is_party = True
+        party_positions = [p[0] for p in getattr(self, "party_positions", [])]
+        if not party_positions:
+            # Fast path: no party filtering needed.
+            monster_positions = list(raw_positions)
+        else:
+            party_dist_sq = 45 * 45
+            for (mx, my) in raw_positions:
+                is_party = False
+                for (px, py) in party_positions:
+                    dx = px - mx
+                    dy = py - my
+                    if (dx * dx + dy * dy) < party_dist_sq:
+                        is_party = True
+                        if need_debug and debug_image is not None:
+                            cv2.circle(debug_image, (mx, my), 6, (255, 0, 0), 2)
+                        if test:
+                            cv2.circle(image, (mx, my), 5, (255, 0, 0), -1)
+                        break
+                if not is_party:
+                    monster_positions.append((mx, my))
+                    if need_debug and debug_image is not None:
+                        cv2.circle(debug_image, (mx, my), 6, (0, 255, 0), 2)
                     if test:
-                        # Draw BLUE for Party
-                        cv2.circle(image, (mx, my), 5, (255, 0, 0), -1)
-                    cv2.circle(debug_image, (mx, my), 6, (255, 0, 0), 2)
-                    break
-            
-            if not is_party:
-                monster_positions.append((mx, my))
-                if test:
-                    # Draw GREEN for Monsters
-                    cv2.circle(image, (mx, my), 5, (0, 255, 0), -1)
-                cv2.circle(debug_image, (mx, my), 6, (0, 255, 0), 2)
+                        cv2.circle(image, (mx, my), 5, (0, 255, 0), -1)
         
         # Optional: visualize party positions used for filtering
-        for player in self.party_positions:
-            px, py = player[0]
-            cv2.circle(debug_image, (int(px), int(py)), 4, (255, 0, 255), -1)
+        if need_debug and debug_image is not None:
+            for (px, py) in party_positions:
+                cv2.circle(debug_image, (int(px), int(py)), 4, (255, 0, 255), -1)
 
         self.monster_positions = monster_positions
         self.last_monster_detection_debug_image = debug_image
@@ -2534,14 +3024,28 @@ class Bot:
         # This part runs every frame to see if we reached our waypoint landmark.
         if marks:
             dist, abs_pos, rel_pos = marks[0]
-            
-            # Arrival Threshold: 6px for walking, 18px "Soft Arrival" for forward kiting
-            arrival_threshold = 6
-            if self.kill and self.kiting_mode.get().lower() == "forward":
-                arrival_threshold = 18
+
+            # Tuned progression: avoid early mark switches.
+            arrival_threshold = float(getattr(self, "cavebot_arrival_threshold_px", 4.0))
+            confirm_frames = max(1, int(getattr(self, "cavebot_arrival_confirm_frames", 2)))
+            immediate_px = float(getattr(self, "cavebot_immediate_advance_px", 1.0))
+
+            # Keep streak coherent when target mark changes.
+            if self.cavebot_arrival_last_mark != self.current_mark:
+                self.cavebot_arrival_streak = 0
+                self.cavebot_arrival_last_mark = self.current_mark
 
             now_ms = timeInMillis()
-            if dist <= arrival_threshold:
+            reached_now = float(dist) <= arrival_threshold
+            if reached_now:
+                self.cavebot_arrival_streak += 1
+            else:
+                self.cavebot_arrival_streak = 0
+
+            immediate_ok = float(dist) <= immediate_px
+            confirmed_ok = self.cavebot_arrival_streak >= confirm_frames
+
+            if reached_now and (immediate_ok or confirmed_ok):
                 if now_ms < self.next_mark_eligible_ms:
                     self._cavebot_log(
                         f"arrival ignored mark={self.current_mark} dist={int(dist)} "
@@ -2574,6 +3078,7 @@ class Bot:
                 # --- ADVANCE TO NEXT MARK ---
                 print(f"[CAVEBOT] Node {self.current_mark} reached ({int(dist)}px). Advancing.")
                 self.clickStop(reason="cavebot_node_reached")
+                self.cavebot_arrival_streak = 0
                 self.nextMark()
                 
                 # REFRESH: Get the NEW mark data immediately so kiting/walking 
@@ -2583,7 +3088,7 @@ class Bot:
         # --- 4. NAVIGATION RESET (Fallback if no marks visible) ---
         if not marks:
             now_ms = timeInMillis()
-            if self.current_mark == self.mark_list[-1]: 
+            if self.current_mark == self.mark_list[-1]:
                 if (now_ms - self.last_cavebot_reset_ms) < 800:
                     self._cavebot_log(
                         f"reset throttled mark={self.current_mark} dt={now_ms - self.last_cavebot_reset_ms}ms",
@@ -2597,18 +3102,15 @@ class Bot:
                 self.current_mark = self.mark_list[0]
                 self.last_cavebot_reset_ms = now_ms
                 self._cavebot_log("reset -> skull (last mark had no candidates)", throttle_ms=0)
-                marks = self.getClosestMarks() 
-                if not marks: return 
-            else:
-                if now_ms < self.next_mark_eligible_ms:
-                    self._cavebot_log(
-                        f"skip advance (cooldown) mark={self.current_mark} "
-                        f"left={self.next_mark_eligible_ms - now_ms}ms",
-                        throttle_ms=120,
-                    )
+                marks = self.getClosestMarks()
+                if not marks:
                     return
-                self._cavebot_log(f"no candidates for {self.current_mark}, advancing", throttle_ms=120)
-                self.nextMark()
+            else:
+                # Do not auto-advance on transient no-visible; this caused pre-reach skips.
+                self._cavebot_log(
+                    f"no candidates for {self.current_mark}; holding current mark",
+                    throttle_ms=200,
+                )
                 return
 
         # --- 5. EXECUTION (Final Movement Step) ---
@@ -3408,8 +3910,11 @@ class Bot:
         """Finds the closest yellow TP cluster in the provided map image and clicks it."""
         map_reg = self.s_Map.region
         
-        # 1. Mask exact yellow pixels
-        tp_mask = np.all(map_img == self.COLOR_TP_BGR, axis=-1).astype(np.uint8) * 255
+        # 1. Tolerant yellow mask (small channel tolerance)
+        yellow = self._yellow_mask_bgr(map_img, tol=12)
+        tp_mask = (yellow.astype(np.uint8) * 255) if yellow is not None else None
+        if tp_mask is None:
+            return
 
         # 2. Use contours to find the cluster center
         contours, _ = cv2.findContours(tp_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -3599,58 +4104,82 @@ class Bot:
     
     def detect_minimap_scale(self, map_img):
         try:
-            # Get dimensions and constants
             mh, mw = map_img.shape[:2]
             cx, cy = mw // 2, mh // 2
-            TERRAIN = np.array(BotConstants.OBSTACLES + BotConstants.WALKABLE, dtype=np.uint8)
-
-            # Define scan strips (Wider range to get more data points in one go)
             x_start, x_end = max(0, cx - 90), min(mw, cx + 90)
             y_start, y_end = max(0, cy - 60), min(mh, cy + 60)
 
             strips = [
-                map_img[np.clip(cy - 40, 0, mh-1), x_start:x_end], 
-                map_img[np.clip(cy + 40, 0, mh-1), x_start:x_end], 
-                map_img[y_start:y_end, np.clip(cx + 45, 0, mw-1)].reshape(-1, 3),
-                map_img[y_start:y_end, np.clip(cx - 45, 0, mw-1)].reshape(-1, 3)
+                map_img[np.clip(cy - 40, 0, mh - 1), x_start:x_end],
+                map_img[np.clip(cy + 40, 0, mh - 1), x_start:x_end],
+                map_img[y_start:y_end, np.clip(cx + 45, 0, mw - 1)].reshape(-1, 3),
+                map_img[y_start:y_end, np.clip(cx - 45, 0, mw - 1)].reshape(-1, 3),
             ]
 
+            # Precompute terrain color codes once (BGR -> packed int).
+            if not hasattr(self, "_terrain_codes_u32"):
+                terrain = np.array(BotConstants.OBSTACLES + BotConstants.WALKABLE, dtype=np.uint8)
+                self._terrain_codes_u32 = (
+                    (terrain[:, 0].astype(np.uint32) << 16)
+                    | (terrain[:, 1].astype(np.uint32) << 8)
+                    | terrain[:, 2].astype(np.uint32)
+                )
+
+            def decide_scale(distances):
+                if len(distances) < 3:
+                    return None
+                counts = Counter(distances)
+                if counts[1] > 0 or counts[3] > 0:
+                    return 1
+                if counts[2] > 0 or counts[6] > 0:
+                    return 2
+                if counts[4] > 0:
+                    return 4
+                return None
+
+            # Fast path: vectorized terrain + edge spacing.
             distances = []
             for strip in strips:
-                if strip.size == 0: continue
-                # Mask pixels that are known terrain
-                is_terrain = np.any(np.all(strip[:, None] == TERRAIN, axis=-1), axis=-1)
-                
-                last_idx = -1
-                for i in range(1, len(strip)):
-                    if is_terrain[i] and is_terrain[i-1]:
-                        if not np.array_equal(strip[i], strip[i-1]):
-                            if last_idx != -1:
-                                d = i - last_idx
-                                if 1 <= d <= 16: distances.append(d)
-                            last_idx = i
+                if strip.size == 0 or len(strip) < 3:
+                    continue
+                codes = (
+                    (strip[:, 0].astype(np.uint32) << 16)
+                    | (strip[:, 1].astype(np.uint32) << 8)
+                    | strip[:, 2].astype(np.uint32)
+                )
+                is_terrain = np.isin(codes, self._terrain_codes_u32, assume_unique=False)
+                changed = np.any(strip[1:] != strip[:-1], axis=1)
+                valid = is_terrain[1:] & is_terrain[:-1] & changed
+                edge_idx = np.flatnonzero(valid) + 1
+                if edge_idx.size < 2:
+                    continue
+                diffs = np.diff(edge_idx)
+                diffs = diffs[(diffs >= 1) & (diffs <= 16)]
+                if diffs.size:
+                    distances.extend(diffs.tolist())
 
-            # --- INSTANT DECISION LOGIC ---
-            # If we don't find enough edges, we don't have enough data to change our mind.
-            if len(distances) < 3:
-                return self.map_scale
+            new_scale = decide_scale(distances)
 
-            counts = Counter(distances)
-            
-            # 1. Evidence for Scale 1 (The most common zoom)
-            # If we see 1s or 3s, it's Scale 1.
-            if counts[1] > 0 or counts[3] > 0:
-                new_scale = 1
-            # 2. Evidence for Scale 2
-            # If no 1s, but we see 2s or 6s, it's Scale 2.
-            elif counts[2] > 0 or counts[6] > 0:
-                new_scale = 2
-            # 3. Scale 4
-            # If everything found is 4, 8, 12...
-            elif counts[4] > 0:
-                new_scale = 4
-            else:
-                # No change if results are ambiguous
+            # Safety fallback: old loop implementation only when vectorized path is ambiguous.
+            if new_scale is None:
+                terrain = np.array(BotConstants.OBSTACLES + BotConstants.WALKABLE, dtype=np.uint8)
+                distances = []
+                for strip in strips:
+                    if strip.size == 0:
+                        continue
+                    is_terrain = np.any(np.all(strip[:, None] == terrain, axis=-1), axis=-1)
+                    last_idx = -1
+                    for i in range(1, len(strip)):
+                        if is_terrain[i] and is_terrain[i - 1]:
+                            if not np.array_equal(strip[i], strip[i - 1]):
+                                if last_idx != -1:
+                                    d = i - last_idx
+                                    if 1 <= d <= 16:
+                                        distances.append(d)
+                                last_idx = i
+                new_scale = decide_scale(distances)
+
+            if new_scale is None:
                 return self.map_scale
 
             if new_scale != self.map_scale:
@@ -3659,38 +4188,154 @@ class Bot:
 
             return self.map_scale
 
-        except Exception as e:
+        except Exception:
             return self.map_scale
+
+    def _yellow_mask_bgr(self, map_img, tol=12):
+        """Returns a boolean mask for minimap yellow (#FFFF00 in BGR) with tolerance."""
+        if map_img is None or map_img.size == 0:
+            return None
+        target = np.array(self.COLOR_TP_BGR, dtype=np.int16)
+        diff = np.abs(map_img.astype(np.int16) - target)
+        return np.all(diff <= int(max(0, tol)), axis=-1)
+
+    def _sample_minimap_grid(self, map_img, S):
+        """
+        Samples 15x11 minimap points with anchor search to avoid phase shifts.
+        On x1/x2 zoom the true tile phase can be offset by one tile.
+        """
+        mh, mw = map_img.shape[:2]
+        base_cx, base_cy = mw // 2, mh // 2
+        s = int(max(1, S))
+
+        if not hasattr(self, "_terrain_codes_u32"):
+            terrain = np.array(BotConstants.OBSTACLES + BotConstants.WALKABLE, dtype=np.uint8)
+            self._terrain_codes_u32 = (
+                (terrain[:, 0].astype(np.uint32) << 16)
+                | (terrain[:, 1].astype(np.uint32) << 8)
+                | terrain[:, 2].astype(np.uint32)
+            )
+
+        offsets = [(0, 0)]
+        if s <= 2:
+            offsets = [(dx, dy) for dy in (-s, 0, s) for dx in (-s, 0, s)]
+
+        best_local = None
+        best_meta = (base_cx, base_cy, 0, 0)
+        best_score = None
+
+        for dx, dy in offsets:
+            cx, cy = base_cx + dx, base_cy + dy
+            local = np.zeros((11, 15, 3), dtype=np.uint8)
+            for r in range(11):
+                for c in range(15):
+                    px, py = cx + (c - 7) * s, cy + (r - 5) * s
+                    if 0 <= px < mw and 0 <= py < mh:
+                        local[r, c] = map_img[py, px]
+                    else:
+                        local[r, c] = [0, 0, 0]
+
+            codes = (
+                (local[:, :, 0].astype(np.uint32) << 16)
+                | (local[:, :, 1].astype(np.uint32) << 8)
+                | local[:, :, 2].astype(np.uint32)
+            )
+            terrain_hits = int(np.count_nonzero(np.isin(codes, self._terrain_codes_u32, assume_unique=False)))
+            yellow_hits = int(np.count_nonzero(self._yellow_mask_bgr(local, tol=12)))
+            center_bias = -int(abs(dx) + abs(dy))
+            score = (terrain_hits + yellow_hits, center_bias)
+
+            if (best_score is None) or (score > best_score):
+                best_score = score
+                best_local = local
+                best_meta = (cx, cy, dx, dy)
+
+        if best_local is None:
+            best_local = np.zeros((11, 15, 3), dtype=np.uint8)
+        cx, cy, dx, dy = best_meta
+        return best_local, cx, cy, dx, dy
+
+    def _extract_tile_sets_from_local_data(self, local_data):
+        """Returns unwalkable/tp tile sets from 15x11 sampled minimap data."""
+        OBS = np.array(BotConstants.OBSTACLES, dtype=np.uint8)
+        LOW_CONF_OBS = np.array(getattr(BotConstants, "LOW_CONF_OBSTACLES", []), dtype=np.uint8)
+        is_obstacle = np.zeros((11, 15), dtype=bool)
+        is_low_conf = np.zeros((11, 15), dtype=bool)
+        is_yellow = self._yellow_mask_bgr(local_data, tol=12)
+
+        for r in range(11):
+            for c in range(15):
+                color = local_data[r, c]
+                if np.any(np.all(color == OBS, axis=-1)):
+                    is_obstacle[r, c] = True
+                if LOW_CONF_OBS.size > 0 and np.any(np.all(color == LOW_CONF_OBS, axis=-1)):
+                    is_low_conf[r, c] = True
+                if is_yellow[r, c]:
+                    is_obstacle[r, c] = False
+                    is_low_conf[r, c] = False
+
+        # Same low-confidence cluster heuristic as collision mapping.
+        visited = np.zeros((11, 15), dtype=bool)
+        dirs = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+        for r in range(11):
+            for c in range(15):
+                if not is_low_conf[r, c] or visited[r, c]:
+                    continue
+                stack = [(r, c)]
+                comp = []
+                visited[r, c] = True
+                while stack:
+                    cr, cc = stack.pop()
+                    comp.append((cr, cc))
+                    for dr, dc in dirs:
+                        nr, nc = cr + dr, cc + dc
+                        if 0 <= nr < 11 and 0 <= nc < 15 and not visited[nr, nc] and is_low_conf[nr, nc]:
+                            visited[nr, nc] = True
+                            stack.append((nr, nc))
+                if len(comp) <= 3:
+                    for cr, cc in comp:
+                        is_obstacle[cr, cc] = True
+
+        unwalkable = {(int(r), int(c)) for r, c in zip(*np.where(is_obstacle))}
+        tp = {(int(r), int(c)) for r, c in zip(*np.where(is_yellow))}
+        return unwalkable, tp
+
+    def _extract_tile_sets_from_map(self, map_img, scale):
+        local_data, _cx, _cy, dx, dy = self._sample_minimap_grid(map_img, scale)
+        unwalkable, tp = self._extract_tile_sets_from_local_data(local_data)
+        return {
+            "unwalkable": sorted([[int(r), int(c)] for (r, c) in unwalkable]),
+            "tp": sorted([[int(r), int(c)] for (r, c) in tp]),
+            "anchor_dx": int(dx),
+            "anchor_dy": int(dy),
+        }
 
     def get_local_collision_map(self):
         map_img = img.screengrab_array(self.hwnd, self.s_Map.region)
         if map_img is None: 
             return None, self.map_scale
 
-        S = self.map_scale 
-        mh, mw = map_img.shape[0], map_img.shape[1]
-        cx, cy = mw // 2, mh // 2
+        # Keep zoom in sync with the exact minimap frame used for collision extraction.
+        # This avoids stale scale state when periodic scale updates are delayed/missed.
+        try:
+            self.map_scale = int(self.detect_minimap_scale(map_img))
+        except Exception:
+            pass
+        S = int(max(1, self.map_scale))
+        local_data, _cx, _cy, anchor_dx, anchor_dy = self._sample_minimap_grid(map_img, S)
+        self.minimap_grid_anchor_dx = int(anchor_dx)
+        self.minimap_grid_anchor_dy = int(anchor_dy)
         
         # 1. Prepare Obstacle Data (The Blacklist)
         OBS = np.array(BotConstants.OBSTACLES, dtype=np.uint8)
         LOW_CONF_OBS = np.array(getattr(BotConstants, "LOW_CONF_OBSTACLES", []), dtype=np.uint8)
         
-        # 2. Vectorized Color Sampling
-        local_data = np.zeros((11, 15, 3), dtype=np.uint8)
-        for r in range(11):
-            for c in range(15):
-                px, py = cx + (c - 7) * S, cy + (r - 5) * S
-                if 0 <= px < mw and 0 <= py < mh:
-                    local_data[r, c] = map_img[py, px]
-                else:
-                    # Boundaries/Outside map treated as walls
-                    local_data[r, c] = [0, 0, 0] 
-
         # 3. Terrain Check:
         # - Strong obstacles: always blocked.
         # - Low-confidence obstacles: blocked only when part of small clusters (1-3 tiles).
         is_obstacle = np.zeros((11, 15), dtype=bool)
         is_low_conf = np.zeros((11, 15), dtype=bool)
+        is_yellow = self._yellow_mask_bgr(local_data, tol=12)
         for r in range(11):
             for c in range(15):
                 color = local_data[r, c]
@@ -3701,6 +4346,9 @@ class Bot:
                     is_obstacle[r, c] = False
                 if LOW_CONF_OBS.size > 0 and np.any(np.all(color == LOW_CONF_OBS, axis=-1)):
                     is_low_conf[r, c] = True
+                if is_yellow[r, c]:
+                    is_obstacle[r, c] = False
+                    is_low_conf[r, c] = False
 
         # Low-confidence cluster heuristic:
         # Treat as blocked only if connected cluster size is small (<=3 tiles).
@@ -3766,6 +4414,8 @@ class Bot:
     
     def visualize_monster_grid(self, collision_grid, current_s):
         try:
+            if timeInMillis() < int(getattr(self, "visualize_pause_until_ms", 0)):
+                return
             # Skip if calculation failed
             if collision_grid is None: return
             
@@ -3783,6 +4433,18 @@ class Bot:
             
             p_row, p_col = 5, 7
 
+            # Detect minimap yellow tiles at tile-center samples (same grid logic as
+            # obstacle detection) to avoid edge-pixel spill into neighboring tiles.
+            tp_tiles = set()
+            map_img = img.screengrab_array(self.hwnd, self.s_Map.region)
+            if map_img is not None:
+                s = int(max(1, self.map_scale))
+                local_data, _mcx, _mcy, _dx, _dy = self._sample_minimap_grid(map_img, s)
+                yellow_local = self._yellow_mask_bgr(local_data, tol=12)
+                ys, xs = np.where(yellow_local)
+                for gr, gc in zip(ys.tolist(), xs.tolist()):
+                    tp_tiles.add((int(gr), int(gc)))
+
             # --- DRAW UI ---
 
             # --- DRAW GRID ---
@@ -3795,6 +4457,9 @@ class Bot:
                     
                     if row == p_row and col == p_col:
                         cv2.rectangle(overlay, (tx, ty), (tx2, ty2), (0, 255, 0), 2)
+                    elif (row, col) in tp_tiles:
+                        # Minimap yellow tiles (TP) shown in green on spatial view.
+                        cv2.rectangle(overlay, (tx, ty), (tx2, ty2), (0, 140, 0), -1)
                     elif collision_grid is not None and collision_grid[row, col] == 1:
                         cv2.rectangle(overlay, (tx, ty), (tx2, ty2), (180, 50, 0), -1)
                     
@@ -3838,6 +4503,15 @@ class Bot:
             # DEBUG TEXT
             cv2.putText(vis, f"ZOOM: {self.map_scale}x", (10, 30), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            cv2.putText(
+                vis,
+                f"TP tiles: {len(tp_tiles)}",
+                (10, 74),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (0, 255, 120),
+                1,
+            )
             if self.vocation == "knight" and hasattr(self, "amp_res_debug") and self.amp_res_debug:
                 dbg = self.amp_res_debug
                 reason = str(dbg.get("reason", "n/a"))
@@ -3857,8 +4531,10 @@ class Bot:
             cv2.addWeighted(overlay, 0.4, vis, 0.6, 0, vis)
             cv2.imshow("AI Spatial Vision", vis)
             cv2.waitKey(1)
+            self.visualize_window_alive = True
         except Exception as e:
             print("Visualization error:", e)
+            self.visualize_window_alive = False
             pass
     
     def debug_boss_tp_minimap(self):
@@ -4062,9 +4738,12 @@ class Bot:
         h, w = map_img.shape[:2]
         S = self.map_scale
         tps = []
+        yellow = self._yellow_mask_bgr(map_img, tol=12)
+        if yellow is None:
+            return tps
         for y in range(S, h - S):
             for x in range(S, w - S):
-                if list(map_img[y, x]) == self.COLOR_TP_BGR:
+                if yellow[y, x]:
                     # Sandwich check
                     if (list(map_img[y, x-S]) == self.COLOR_RED_TILE_BGR and list(map_img[y, x+S]) == self.COLOR_RED_TILE_BGR) or \
                        (list(map_img[y-S, x]) == self.COLOR_RED_TILE_BGR and list(map_img[y+S, x]) == self.COLOR_RED_TILE_BGR):

@@ -6,7 +6,6 @@ import threading
 import win32gui
 import win32ui
 from ctypes import windll
-import PIL.Image
 
 class BackgroundFrameGrabber:
     """
@@ -33,8 +32,13 @@ class BackgroundFrameGrabber:
         self.metrics_seq = 0
         self._running = False
         self._thread = None
+        self._lock = threading.RLock()
+        self._last_geom = None  # (l,t,r,b,cw,ch)
+        self._geom_changed_at = 0.0
+        self._settle_s = 0.12
 
     def _release_gdi(self):
+        # Caller should hold self._lock when invoking this method.
         if not self._gdi:
             return
         try:
@@ -64,6 +68,7 @@ class BackgroundFrameGrabber:
         self._gdi = None
 
     def _ensure_gdi(self, w, h):
+        # Caller should hold self._lock when invoking this method.
         if self._gdi and self._gdi.get("w") == w and self._gdi.get("h") == h:
             return
 
@@ -86,53 +91,83 @@ class BackgroundFrameGrabber:
         }
 
     def _capture_window_rgb(self):
-        l, t, r, b = win32gui.GetWindowRect(self.hwnd)
-        w = r - l
-        h = b - t
+        with self._lock:
+            l, t, r, b = win32gui.GetWindowRect(self.hwnd)
+            w = r - l
+            h = b - t
+            _, _, cw, ch = win32gui.GetClientRect(self.hwnd)
+            geom = (l, t, r, b, cw, ch)
+            now = time.perf_counter()
 
-        self._ensure_gdi(w, h)
-        saveDC = self._gdi["saveDC"]
-        bmp = self._gdi["bmp"]
+            # During drag/resize the geometry changes rapidly. Skip capture until
+            # it stabilizes to avoid PrintWindow/GDI instability.
+            if self._last_geom is None:
+                self._last_geom = geom
+                self._geom_changed_at = now
+                return None
+            if geom != self._last_geom:
+                self._last_geom = geom
+                self._geom_changed_at = now
+                self._release_gdi()
+                return None
+            if (now - self._geom_changed_at) < self._settle_s:
+                return None
 
-        # PW_RENDERFULLCONTENT=2 (what you were using)
-        result = windll.user32.PrintWindow(self.hwnd, saveDC.GetSafeHdc(), 2)
+            if w <= 0 or h <= 0:
+                return None
+            if not win32gui.IsWindow(self.hwnd) or win32gui.IsIconic(self.hwnd):
+                return None
 
-        bmpinfo = bmp.GetInfo()
-        bmpstr = bmp.GetBitmapBits(True)
+            self._ensure_gdi(w, h)
+            saveDC = self._gdi["saveDC"]
+            bmp = self._gdi["bmp"]
 
-        if result != 1:
-            return None  # capture failed
+            # PW_RENDERFULLCONTENT=2
+            result = windll.user32.PrintWindow(self.hwnd, saveDC.GetSafeHdc(), 2)
+            bmpinfo = bmp.GetInfo()
+            bmpstr = bmp.GetBitmapBits(True)
 
-        im = PIL.Image.frombuffer(
-            "RGB",
-            (bmpinfo["bmWidth"], bmpinfo["bmHeight"]),
-            bmpstr,
-            "raw",
-            "BGRX",
-            0,
-            1
-        )
-        return np.array(im)  # RGB
+            if result != 1:
+                return None  # capture failed
+
+            try:
+                bw = int(bmpinfo.get("bmWidth", 0))
+                bh = int(bmpinfo.get("bmHeight", 0))
+                if bw <= 0 or bh <= 0:
+                    return None
+                arr = np.frombuffer(bmpstr, dtype=np.uint8)
+                expected = bw * bh * 4
+                if arr.size < expected:
+                    return None
+                arr = arr[:expected].reshape((bh, bw, 4))
+                # BGRX -> RGB
+                rgb = cv2.cvtColor(arr, cv2.COLOR_BGRA2RGB)
+                return rgb
+            except Exception:
+                # Resize/race edge cases can invalidate backing bits briefly.
+                return None
 
     def __del__(self):
-        self._release_gdi()
+        with self._lock:
+            self._release_gdi()
     
     def _refresh_crop(self):
-        win_l, win_t, win_r, win_b = win32gui.GetWindowRect(self.hwnd)
-        c0_sx, c0_sy = win32gui.ClientToScreen(self.hwnd, (0, 0))
-        off_x = c0_sx - win_l
-        off_y = c0_sy - win_t
-        _, _, cw, ch = win32gui.GetClientRect(self.hwnd)
-        self._crop = (off_x, off_y, off_x + cw, off_y + ch)
-
-        self._last_win_rect = (win_l, win_t, win_r, win_b)
-        self._last_client_rect = (0, 0, cw, ch)
+        with self._lock:
+            win_l, win_t, win_r, win_b = win32gui.GetWindowRect(self.hwnd)
+            c0_sx, c0_sy = win32gui.ClientToScreen(self.hwnd, (0, 0))
+            off_x = c0_sx - win_l
+            off_y = c0_sy - win_t
+            _, _, cw, ch = win32gui.GetClientRect(self.hwnd)
+            self._crop = (off_x, off_y, off_x + cw, off_y + ch)
+            self._last_win_rect = (win_l, win_t, win_r, win_b)
+            self._last_client_rect = (0, 0, cw, ch)
 
     def _maybe_refresh_crop(self):
-        win_rect = win32gui.GetWindowRect(self.hwnd)
-        client_rect = win32gui.GetClientRect(self.hwnd)
-        if self._crop is None or win_rect != self._last_win_rect or client_rect != self._last_client_rect:
-            self._refresh_crop()
+        with self._lock:
+            win_rect = win32gui.GetWindowRect(self.hwnd)
+            client_rect = win32gui.GetClientRect(self.hwnd)
+            if self._crop is None or win_rect != self._last_win_rect or client_rect != self._last_client_rect:
+                self._refresh_crop()
 
     def _window_to_client_crop(self, window_rgb):
         # Convert client origin to WINDOW-relative coordinates
@@ -178,12 +213,22 @@ class BackgroundFrameGrabber:
 
         # Crop is refreshed by Bot.updateWindowCoordinates() on any resize/move.
         # Avoid per-frame Win32 rect checks here.
-        if self._crop is None:
-            self._refresh_crop()
-        x1, y1, x2, y2 = self._crop
+        with self._lock:
+            if self._crop is None:
+                self._refresh_crop()
+            x1, y1, x2, y2 = self._crop
 
         t_conv0 = time.perf_counter()
         client_rgb = window_rgb[y1:y2, x1:x2]
+        if client_rgb.size == 0:
+            self.last_metrics = {
+                "throttled": False,
+                "capture_ms": (t_cap1 - t_cap0) * 1000.0,
+                "crop_convert_ms": 0.0,
+                "total_ms": (time.perf_counter() - t_start) * 1000.0,
+            }
+            self.metrics_seq += 1
+            return False
         # OpenCV conversion is typically faster and returns contiguous output.
         self.frame_bgr = cv2.cvtColor(client_rgb, cv2.COLOR_RGB2BGR)
         t_conv1 = time.perf_counter()
@@ -214,7 +259,8 @@ class BackgroundFrameGrabber:
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)
         self._thread = None
-        self._release_gdi()
+        with self._lock:
+            self._release_gdi()
 
 
     def get_pixel_rgb(self, cx, cy):

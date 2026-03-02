@@ -5,7 +5,7 @@ import win32api
 import win32ui
 import os
 import time
-import data
+from src.bot.config import data
 import multiprocessing as mp
 import win32clipboard
 import pyautogui

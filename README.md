@@ -22,16 +22,14 @@ Only OTservers supported.
 
 # Project Structure
 
-Core code is being migrated to `src/bot`:
+Core code lives in `src/bot`:
 
 - `src/bot/config`: constants, config manager, static data
 - `src/bot/vision`: capture, image processing, screen elements, monster detection
 - `src/bot/actions`: input and window interaction
 - `src/bot/ui`: client picker and main GUI
 - `src/bot/utils`: shared helpers
-- `src/bot/core`: runtime orchestration (`bot_runtime.py` current runtime, `legacy_main.py` compatibility wrapper)
-
-Legacy root files are kept as compatibility wrappers during the migration.
+- `src/bot/core`: runtime orchestration (`bot_runtime.py`, `runner.py`, `app.py`)
 
 # Features Status
 
