@@ -42,7 +42,9 @@ def _log_action(msg):
         return
 
     now_ms = int(time.time() * 1000)
-    line = f"{msg}{_caller_tag()}"
+    ts = time.strftime("%H:%M:%S", time.localtime())
+    ms = int((time.time() % 1) * 1000)
+    line = f"[{ts}.{ms:03d}] {msg}{_caller_tag()}"
     if line == _LAST_ACTION_LOG_LINE and (now_ms - _LAST_ACTION_LOG_TS_MS) < _ACTION_LOG_DEDUPE_MS:
         _SUPPRESSED_ACTION_LOGS += 1
         return

@@ -541,7 +541,7 @@ class Bot:
         # Click the center of the slot, not the top-left sample pixel.
         click_x = x + 17
         click_y = y + 17
-        ctx_parts = [f"caller={source or 'unknown'}", f"slot={pos}"]
+        ctx_parts = [f"source={source or 'unknown'}", f"slot={pos}"]
         if key:
             ctx_parts.append(f"key={key}")
         if equip_action:
@@ -1976,6 +1976,7 @@ class Bot:
         
         # Define the keys we care about
         equip_keys = ["weapon", "helmet", "armor", "amulet", "ring", "shield"]
+        accessories = {"amulet", "ring"}
         
         for key in equip_keys:
             slot_id = self.slots.get(key)
@@ -1986,6 +1987,10 @@ class Bot:
                 if self.isActionbarSlotEnabled(slot_id):
                     # Item is equipped/active. Unequip if safe.
                     if not in_combat:
+                        # Accessories are server-sensitive (toggle/use semantics vary).
+                        # Keep them equip-only to avoid re-equip/unequip oscillation.
+                        if key in accessories:
+                            continue
                         # print(f"Disabling {key}")
                         last_click_ms = int(self.equip_last_click_by_slot.get((slot_id, "unequip"), 0))
                         if (now_ms - last_click_ms) < 2500:
