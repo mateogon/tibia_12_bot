@@ -2688,7 +2688,7 @@ class Bot:
         # Slightly more permissive thresholds for noisy minimaps/icons.
         # Lock tends to be the most fragile on some servers.
         if mark_type == "lock":
-            return 0.86
+            return 0.80
         if mark_type == "skull":
             return 0.88
         return 0.89
