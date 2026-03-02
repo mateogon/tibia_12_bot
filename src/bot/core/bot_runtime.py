@@ -173,8 +173,10 @@ class Bot:
         self.loop_count = 0
         self.circuit_marks_found = 0
         # Default cavebot cycle (shared by F11/F12 painter + cave navigation).
-        # 'lock' is intentionally excluded because many routes use only these 3 marks.
+        # Lock mark can be optionally enabled from settings.
         self.mark_list = ["skull", "cross", "star"]
+        if self._bool_value(getattr(self, "use_lock_mark", False)):
+            self.mark_list = ["skull", "lock", "cross", "star"]
         self.current_mark_index = 0
         self.current_mark = self.mark_list[0]
         # NEW: Separate index for the manual mark-placer
@@ -265,6 +267,7 @@ class Bot:
         self.use_static_lure = BooleanVar(value=s.get("use_static_lure", False))
         self.use_recenter = BooleanVar(value=s.get("use_recenter", False))
         self.use_kiting   = BooleanVar(value=s.get("use_kiting", False))
+        self.use_lock_mark = BooleanVar(value=s.get("use_lock_mark", False))
         self.follow_party     = BooleanVar(value=s.get("follow_party", False))
         self.manual_loot      = BooleanVar(value=s.get("manual_loot", False))
         self.loot_on_spot     = BooleanVar(value=s.get("loot_on_spot", False))
@@ -2236,7 +2239,12 @@ class Bot:
                 for i in range(self.current_mark_index + 1, len(self.mark_list)):
                     temp_mark = self.mark_list[i]
                     # Si alguna de las siguientes marcas es visible en el minimapa
-                    if img.locateImage(self.hwnd, f"map_marks/{temp_mark}.png", self.s_Map.region, 0.90):
+                    if img.locateImage(
+                        self.hwnd,
+                        f"map_marks/{temp_mark}.png",
+                        self.s_Map.region,
+                        self._mark_match_threshold(temp_mark),
+                    ):
                         print(f"[STATIC LURE] No veo {self.current_mark}, saltando a {temp_mark}")
                         self.current_mark_index = i
                         self.current_mark = temp_mark
@@ -2676,6 +2684,15 @@ class Bot:
                   map_reg[0] + rx + 10, map_reg[1] + ry + 10)
         return img.screengrab_array(self.hwnd, fp_reg)
 
+    def _mark_match_threshold(self, mark_type):
+        # Slightly more permissive thresholds for noisy minimaps/icons.
+        # Lock tends to be the most fragile on some servers.
+        if mark_type == "lock":
+            return 0.86
+        if mark_type == "skull":
+            return 0.88
+        return 0.89
+
     def getClosestMarks(self):
         scale = 3 
         map_region = self.s_Map.region
@@ -2686,7 +2703,13 @@ class Bot:
         if map_img is None: return []
         map_hd = cv2.resize(map_img, (mw * scale, mh * scale), interpolation=cv2.INTER_CUBIC)
         
-        positions = img.locateManyImage(self.hwnd, f"map_marks/{self.current_mark}.png", map_region, 0.90)
+        mark_thr = self._mark_match_threshold(self.current_mark)
+        positions = img.locateManyImage(
+            self.hwnd,
+            f"map_marks/{self.current_mark}.png",
+            map_region,
+            mark_thr,
+        )
         
         result = []
         visited_candidates = []
