@@ -54,7 +54,7 @@ class BotRunner:
         if self.count % detect_every != 0:
             return
 
-        from src.bot.vision import image as img
+        from src.vision import image as img
 
         t0 = time.perf_counter()
         map_img = img.screengrab_array(self.bot.hwnd, self.bot.s_Map.region)

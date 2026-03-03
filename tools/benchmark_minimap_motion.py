@@ -20,7 +20,7 @@ import time
 import cv2
 import numpy as np
 
-from src.bot.config.constants import BotConstants
+from src.config.constants import BotConstants
 
 
 TERRAIN_BGR = np.array(

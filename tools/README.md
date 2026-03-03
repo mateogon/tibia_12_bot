@@ -34,7 +34,7 @@ Keep datasets in `training_data/` at repo root.
   - Evaluates monster detector vs `training_data/*.json` labels, including optional offset sweep.
 
 - `tools/detect_monsters.py`
-  - CLI wrapper for the runtime monster detector (`src.bot.vision.detect_monsters`).
+  - CLI wrapper for the runtime monster detector (`src.vision.detect_monsters`).
 
 - `tools/annotation_tool.py`
   - Manual annotation editor for `training_data/*.json` coordinates.

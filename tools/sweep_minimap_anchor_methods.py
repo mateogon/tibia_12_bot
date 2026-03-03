@@ -15,7 +15,7 @@ from collections import Counter, defaultdict
 import cv2
 import numpy as np
 
-from src.bot.config.constants import BotConstants
+from src.config.constants import BotConstants
 
 
 PALETTE_U8 = np.array(BotConstants.OBSTACLES + BotConstants.WALKABLE, dtype=np.uint8)

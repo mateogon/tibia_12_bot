@@ -21,19 +21,19 @@ from scipy.spatial import distance
 wsh= comclt.Dispatch("WScript.Shell")
 
 # LOCAL
-from src.bot.config import data
-from src.bot.vision import image as img
-from src.bot.vision import detect_monsters as dm
-from src.bot.config import config_manager as cm
-from src.bot.config.constants import BotConstants
-from src.bot.vision.screen_elements import *
-from src.bot.actions.window_interaction import *
-from src.bot.utils.extras import *
-from src.bot.ui.choose_client_gui import choose_capture_window
-from src.bot.ui.main_GUI import *
+from src.config import data
+from src.vision import image as img
+from src.vision import detect_monsters as dm
+from src.config import config_manager as cm
+from src.config.constants import BotConstants
+from src.vision.screen_elements import *
+from src.actions.window_interaction import *
+from src.utils.extras import *
+from src.ui.choose_client_gui import choose_capture_window
+from src.ui.main_GUI import *
 from tkinter import BooleanVar,StringVar,IntVar,PhotoImage
 from functools import partial
-from src.bot.vision.bg_capture import BackgroundFrameGrabber
+from src.vision.bg_capture import BackgroundFrameGrabber
 
 # endregion
 

@@ -6,7 +6,7 @@ from math import sqrt
 
 import cv2
 
-from src.bot.vision.detect_monsters import detect_monsters
+from src.vision.detect_monsters import detect_monsters
 
 
 def match_points(gt, pred, max_dist):

@@ -14,7 +14,7 @@ import os
 import cv2
 import numpy as np
 
-from src.bot.config.constants import BotConstants
+from src.config.constants import BotConstants
 
 PALETTE = np.array(BotConstants.OBSTACLES + BotConstants.WALKABLE, dtype=np.float32)
 RED_TILE = np.array([0, 51, 255], dtype=np.uint8)

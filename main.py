@@ -2,15 +2,15 @@
 
 from typing import TYPE_CHECKING
 
-from src.bot.core.app import run
+from src.core.app import run
 
 if TYPE_CHECKING:
-    from src.bot.core.bot import Bot as Bot
+    from src.core.bot import Bot as Bot
 
 
 def __getattr__(name):
     if name == "Bot":
-        from src.bot.core.bot import Bot as _Bot
+        from src.core.bot import Bot as _Bot
 
         return _Bot
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

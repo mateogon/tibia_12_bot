@@ -22,14 +22,14 @@ Only OTservers supported.
 
 # Project Structure
 
-Core code lives in `src/bot`:
+Core code lives in `src`:
 
-- `src/bot/config`: constants, config manager, static data
-- `src/bot/vision`: capture, image processing, screen elements, monster detection
-- `src/bot/actions`: input and window interaction
-- `src/bot/ui`: client picker and main GUI
-- `src/bot/utils`: shared helpers
-- `src/bot/core`: runtime orchestration (`bot_runtime.py`, `runner.py`, `app.py`)
+- `src/config`: constants, config manager, static data
+- `src/vision`: capture, image processing, screen elements, monster detection
+- `src/actions`: input and window interaction
+- `src/ui`: client picker and main GUI
+- `src/utils`: shared helpers
+- `src/core`: runtime orchestration (`bot_runtime.py`, `runner.py`, `app.py`)
 
 # Features Status
 

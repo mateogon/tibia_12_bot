@@ -5,8 +5,8 @@ import cv2
 import numpy as np
 import win32gui
 
-from src.bot.vision import image as img
-from src.bot.actions.window_interaction import click_client, rclick_client
+from src.vision import image as img
+from src.actions.window_interaction import click_client, rclick_client
 
 TIBIA_TITLE_SUBSTR = "Tibia - Helios"
 TEMPLATE_PATH = "img/hud/menu_follow.png"
