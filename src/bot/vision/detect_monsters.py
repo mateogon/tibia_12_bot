@@ -11,13 +11,16 @@ from ..config.constants import BotConstants
 MIN_BAR_WIDTH = 28 
 BORDER_MERGE_DIST = 8 
 STACK_MERGE_DIST = 18 
+HP_BAR_W = 31
+HP_BAR_H = 4
 
 OFFSET_MONSTER = 32   
 OFFSET_PLAYER  = 46   
 
 LOWER_BLACK = np.array([0, 0, 0], dtype=np.uint8)
-UPPER_BLACK = np.array([15, 15, 15], dtype=np.uint8)
+UPPER_BLACK = np.array([8, 8, 8], dtype=np.uint8)
 KERNEL_LINE = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 1))
+STRICT_BLACK_TOL = 2
 
 # Precompute HP colors in BGR once (runtime uses BGR images).
 HP_COLORS_BGR = np.array(
@@ -38,6 +41,59 @@ def _roi_has_hp_color(roi_bgr):
     return bool(np.any(matches))
 
 
+def _validate_hp_bar_geometry(full_image_bgr, x, y, w, h):
+    """
+    Validate fixed HP bar geometry (31x4):
+    - pure/near-pure black top and bottom borders
+    - black side borders
+    - at least one known HP color pixel in the 29x2 interior
+    Returns normalized (x, y, 31, 4) or None.
+    """
+    ih, iw = full_image_bgr.shape[:2]
+    if iw < HP_BAR_W or ih < HP_BAR_H:
+        return None
+
+    # Fast path: contour center anchors x; test only tiny neighborhood.
+    cx = x + (w // 2)
+    x0_base = cx - (HP_BAR_W // 2)
+    x_candidates = (x0_base - 1, x0_base, x0_base + 1)
+    # Contour can correspond to top or bottom border line.
+    y_candidates = (y, y - (HP_BAR_H - 1))
+
+    best = None
+    best_score = -1.0
+    for top in y_candidates:
+        for x0 in x_candidates:
+            if x0 < 0 or top < 0 or (x0 + HP_BAR_W) > iw or (top + HP_BAR_H) > ih:
+                continue
+            roi = full_image_bgr[top:top + HP_BAR_H, x0:x0 + HP_BAR_W]
+
+            top_row = np.all(roi[0] <= STRICT_BLACK_TOL, axis=1)
+            bot_row = np.all(roi[HP_BAR_H - 1] <= STRICT_BLACK_TOL, axis=1)
+            left_col = np.all(roi[:, 0] <= STRICT_BLACK_TOL, axis=1)
+            right_col = np.all(roi[:, HP_BAR_W - 1] <= STRICT_BLACK_TOL, axis=1)
+
+            top_ratio = float(np.count_nonzero(top_row)) / HP_BAR_W
+            bot_ratio = float(np.count_nonzero(bot_row)) / HP_BAR_W
+            left_ratio = float(np.count_nonzero(left_col)) / HP_BAR_H
+            right_ratio = float(np.count_nonzero(right_col)) / HP_BAR_H
+
+            if top_ratio < 0.95 or bot_ratio < 0.95:
+                continue
+            if left_ratio < 0.75 or right_ratio < 0.75:
+                continue
+
+            inner = roi[1:3, 1:30]  # 29x2
+            if not _roi_has_hp_color(inner):
+                continue
+
+            score = top_ratio + bot_ratio + left_ratio + right_ratio
+            if score > best_score:
+                best_score = score
+                best = (x0, top, HP_BAR_W, HP_BAR_H)
+    return best
+
+
 def detect_monsters(full_image_bgr, return_debug=False):
     """
     Detects monsters using the 'Black Line' method validated by HP color presence.
@@ -55,12 +111,9 @@ def detect_monsters(full_image_bgr, return_debug=False):
     for cnt in contours:
         x, y, w, h = cv2.boundingRect(cnt)
         if w > MIN_BAR_WIDTH:
-            # --- VALIDATION STEP ---
-            # Check a small strip just below/inside the black line for known HP colors.
-            # If there's NO HP color in this horizontal strip, skip it
-            roi_hp = full_image_bgr[y:y+3, x:x+w]
-            if _roi_has_hp_color(roi_hp):
-                lines.append((x, y, w, h))
+            normalized = _validate_hp_bar_geometry(full_image_bgr, x, y, w, h)
+            if normalized is not None:
+                lines.append(normalized)
 
     if not lines:
         if return_debug:
@@ -146,9 +199,9 @@ def detect_monsters_legacy(full_image_bgr):
     for cnt in contours:
         x, y, w, h = cv2.boundingRect(cnt)
         if w > MIN_BAR_WIDTH:
-            roi_hp = hp_mask[y:y+3, x:x+w]
-            if cv2.countNonZero(roi_hp) > 0:
-                lines.append((x, y, w, h))
+            normalized = _validate_hp_bar_geometry(full_image_bgr, x, y, w, h)
+            if normalized is not None:
+                lines.append(normalized)
 
     if not lines:
         return []
@@ -216,9 +269,9 @@ def _detect_monsters_profile(full_image_bgr):
     for cnt in contours:
         x, y, w, h = cv2.boundingRect(cnt)
         if w > MIN_BAR_WIDTH:
-            roi_hp = full_image_bgr[y:y+3, x:x+w]
-            if _roi_has_hp_color(roi_hp):
-                lines.append((x, y, w, h))
+            normalized = _validate_hp_bar_geometry(full_image_bgr, x, y, w, h)
+            if normalized is not None:
+                lines.append(normalized)
 
     if not lines:
         t4 = time.perf_counter_ns()
@@ -301,11 +354,11 @@ def _detect_monsters_legacy_profile(full_image_bgr):
 
     lines = []
     for cnt in contours:
-        x, y, w, _ = cv2.boundingRect(cnt)
+        x, y, w, h = cv2.boundingRect(cnt)
         if w > MIN_BAR_WIDTH:
-            roi_hp = hp_mask[y:y+3, x:x+w]
-            if cv2.countNonZero(roi_hp) > 0:
-                lines.append((x, y, w, 1))
+            normalized = _validate_hp_bar_geometry(full_image_bgr, x, y, w, h)
+            if normalized is not None:
+                lines.append(normalized)
 
     if not lines:
         t4 = time.perf_counter_ns()
