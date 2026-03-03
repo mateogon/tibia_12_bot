@@ -85,7 +85,7 @@ def main():
         count += 1
 
     print(f"Done! Updated {count} files.")
-    print("Check 'annotation_tool.py' again.")
+    print("Check 'tools/annotation_tool.py' again.")
 
 if __name__ == "__main__":
     main()

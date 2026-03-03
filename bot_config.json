@@ -796,7 +796,8 @@
                 "weapon": 17,
                 "shield": 21,
                 "armor": 18,
-                "helmet": 16
+                "helmet": 16,
+                "sell_stone": 22
             },
             "spells": {
                 "area_slots": [
@@ -839,7 +840,7 @@
                 "min_monsters_spell": 1,
                 "min_monsters_rune": 1,
                 "kill_amount": 5,
-                "kill_stop_amount": 1,
+                "kill_stop_amount": 2,
                 "party_leader": "Mateogon",
                 "waypoint_folder": "test",
                 "log_cavebot": false,
@@ -849,7 +850,76 @@
                 "cavebot_record_zoom_label": 0,
                 "log_enabled": true,
                 "log_actions": false,
-                "log_perf": false
+                "log_perf": false,
+                "use_auto_sell_stone": true,
+                "auto_sell_stone_interval_s": 60
+            }
+        },
+        "morgarot.com::Mateogon::knight": {
+            "slots": {
+                "heal_high": 0,
+                "heal_low": 1,
+                "mana": 2,
+                "sio": null,
+                "haste": 10,
+                "food": 12,
+                "utito": 15,
+                "exeta": 9,
+                "amp_res": 14,
+                "magic_shield": null,
+                "cancel_magic_shield": null,
+                "area_rune": 5,
+                "ring": 20,
+                "amulet": 19,
+                "weapon": 17,
+                "shield": 21,
+                "armor": 18,
+                "helmet": 16
+            },
+            "spells": {
+                "area_slots": [
+                    4,
+                    5,
+                    6
+                ],
+                "target_slots": [
+                    8
+                ]
+            },
+            "settings": {
+                "loop": true,
+                "attack": true,
+                "attack_spells": true,
+                "hp_heal": true,
+                "mp_heal": true,
+                "manual_loot": false,
+                "cavebot": false,
+                "use_static_lure": false,
+                "use_lure_walk": false,
+                "lure_walk_ms": 600,
+                "lure_stop_ms": 400,
+                "use_recenter": true,
+                "use_kiting": false,
+                "res": true,
+                "amp_res": false,
+                "follow_party": false,
+                "use_area_rune": false,
+                "manage_equipment": false,
+                "loot_on_spot": false,
+                "show_area_rune_target": true,
+                "use_utito": true,
+                "use_haste": false,
+                "use_food": false,
+                "use_magic_shield": false,
+                "hp_thresh_high": 90,
+                "hp_thresh_low": 60,
+                "mp_thresh": 10,
+                "min_monsters_spell": 2,
+                "min_monsters_rune": 1,
+                "kill_amount": 5,
+                "kill_stop_amount": 1,
+                "party_leader": "Mateogon",
+                "waypoint_folder": "test"
             }
         }
     }

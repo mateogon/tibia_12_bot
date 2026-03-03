@@ -16,6 +16,9 @@ import numpy as np
 
 from src.bot.config.constants import BotConstants
 
+PALETTE = np.array(BotConstants.OBSTACLES + BotConstants.WALKABLE, dtype=np.float32)
+RED_TILE = np.array([0, 51, 255], dtype=np.uint8)
+
 
 def yellow_mask_bgr(img_bgr, tol=12):
     target = np.array([0, 255, 255], dtype=np.int16)
@@ -70,6 +73,181 @@ def choose_runtime_anchor_now(map_img, scale):
             best_score = score
             best = (int(dx), int(dy))
     return best
+
+
+def _center_confidence_score(local_data, scale):
+    s = int(max(1, scale))
+    rad = 1 if s >= 2 else 0
+    total = 0.0
+    count = 0
+    h, w = local_data.shape[:2]
+    for r in range(h):
+        for c in range(w):
+            y0 = max(0, r - rad)
+            y1 = min(h, r + rad + 1)
+            x0 = max(0, c - rad)
+            x1 = min(w, c + rad + 1)
+            patch = local_data[y0:y1, x0:x1].astype(np.float32).reshape(-1, 3)
+            if patch.size == 0:
+                continue
+            mean_color = patch.mean(axis=0)
+            d = np.sqrt(np.sum((PALETTE - mean_color[None, :]) ** 2, axis=1))
+            if d.size < 2:
+                continue
+            order = np.sort(d)
+            nearest = float(order[0])
+            second = float(order[1])
+            margin = max(0.0, second - nearest)
+            # Better when nearest palette color is close and separation is clear.
+            total += (-nearest) + (0.6 * margin)
+            count += 1
+    if count <= 0:
+        return -1e9
+    return float(total / count)
+
+
+def _topology_consistency_score(local_data):
+    unwalkable, tp = extract_tiles(local_data)
+    if not unwalkable:
+        base = 0.0
+    else:
+        adj = 0
+        isolated = 0
+        for r, c in unwalkable:
+            n = 0
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                if (r + dr, c + dc) in unwalkable:
+                    n += 1
+            adj += n
+            if n == 0:
+                isolated += 1
+        base = float(adj) - (1.2 * float(isolated))
+
+    # TP support: TP tiles should often sit next to a red edge tile in local grid.
+    red_mask = np.all(local_data == RED_TILE[None, None, :], axis=-1)
+    tp_support = 0
+    for r, c in tp:
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            rr, cc = r + dr, c + dc
+            if 0 <= rr < 11 and 0 <= cc < 15 and red_mask[rr, cc]:
+                tp_support += 1
+                break
+    return base + (0.8 * float(tp_support))
+
+
+def choose_anchor_center_topology(map_img, scale):
+    s = int(max(1, scale))
+    offsets = [(0, 0)]
+    if s <= 2:
+        r = 2
+        offsets = [(dx, dy) for dy in range(-r, r + 1) for dx in range(-r, r + 1)]
+
+    best = (0, 0)
+    best_score = None
+    best_parts = (0.0, 0.0, 0.0)
+    for dx, dy in offsets:
+        local = sample_local_data(map_img, s, dx=dx, dy=dy)
+        center_score = _center_confidence_score(local, s)
+        topo_score = _topology_consistency_score(local)
+        center_bias = -0.2 * float(abs(dx) + abs(dy))
+        score = center_score + (0.45 * topo_score) + center_bias
+        if best_score is None or score > best_score:
+            best_score = score
+            best = (int(dx), int(dy))
+            best_parts = (float(center_score), float(topo_score), float(center_bias))
+    return best, float(best_score or 0.0), best_parts
+
+
+def _edge_distance_score(map_img, scale, dx, dy):
+    h, w = map_img.shape[:2]
+    # Edge map from minimap colors; captures tile boundaries across themes.
+    gray = cv2.cvtColor(map_img, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 20, 60)
+    # Distance to nearest edge: larger means likely inside a tile center.
+    dist = cv2.distanceTransform((edges == 0).astype(np.uint8), cv2.DIST_L2, 3)
+
+    s = int(max(1, scale))
+    cx, cy = (w // 2) + int(dx), (h // 2) + int(dy)
+    vals = []
+    for r in range(11):
+        for c in range(15):
+            px = cx + (c - 7) * s
+            py = cy + (r - 5) * s
+            if 0 <= px < w and 0 <= py < h:
+                vals.append(float(dist[py, px]))
+    if not vals:
+        return -1e9
+    # Favor high median interior distance and penalize low outliers.
+    med = float(np.median(vals))
+    p10 = float(np.percentile(vals, 10))
+    return med + (0.35 * p10)
+
+
+def choose_anchor_edge_distance(map_img, scale):
+    s = int(max(1, scale))
+    offsets = [(0, 0)]
+    if s <= 2:
+        r = 2
+        offsets = [(dx, dy) for dy in range(-r, r + 1) for dx in range(-r, r + 1)]
+
+    best = (0, 0)
+    best_score = None
+    for dx, dy in offsets:
+        score = _edge_distance_score(map_img, s, dx, dy) - (0.1 * float(abs(dx) + abs(dy)))
+        if best_score is None or score > best_score:
+            best_score = score
+            best = (int(dx), int(dy))
+    return best, float(best_score or 0.0)
+
+
+def _raw_boundary_distance_transform(map_img):
+    """Boundary map from direct neighbor color differences (no Canny thresholds)."""
+    h, w = map_img.shape[:2]
+    img16 = map_img.astype(np.int16)
+    diff_r = np.sum(np.abs(img16[:, 1:, :] - img16[:, :-1, :]), axis=2)
+    diff_d = np.sum(np.abs(img16[1:, :, :] - img16[:-1, :, :]), axis=2)
+    # Low threshold: we want tile-edge color transitions, not only hard edges.
+    thr = 18
+    bmap = np.zeros((h, w), dtype=np.uint8)
+    bmap[:, 1:] |= (diff_r > thr).astype(np.uint8)
+    bmap[1:, :] |= (diff_d > thr).astype(np.uint8)
+    # Thicken boundaries a bit so distance landscape is smoother.
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    bmap = cv2.dilate(bmap, kernel, iterations=1)
+    dist = cv2.distanceTransform((bmap == 0).astype(np.uint8), cv2.DIST_L2, 3)
+    return dist
+
+
+def choose_anchor_raw_boundary_distance(map_img, scale):
+    s = int(max(1, scale))
+    offsets = [(0, 0)]
+    if s <= 2:
+        r = 2
+        offsets = [(dx, dy) for dy in range(-r, r + 1) for dx in range(-r, r + 1)]
+
+    dist = _raw_boundary_distance_transform(map_img)
+    h, w = map_img.shape[:2]
+
+    best = (0, 0)
+    best_score = None
+    for dx, dy in offsets:
+        cx, cy = (w // 2) + int(dx), (h // 2) + int(dy)
+        vals = []
+        for r in range(11):
+            for c in range(15):
+                px = cx + (c - 7) * s
+                py = cy + (r - 5) * s
+                if 0 <= px < w and 0 <= py < h:
+                    vals.append(float(dist[py, px]))
+        if not vals:
+            continue
+        med = float(np.median(vals))
+        p20 = float(np.percentile(vals, 20))
+        score = med + (0.45 * p20) - (0.1 * float(abs(dx) + abs(dy)))
+        if best_score is None or score > best_score:
+            best_score = score
+            best = (int(dx), int(dy))
+    return best, float(best_score or -1e9)
 
 
 def extract_tiles(local_data):
@@ -224,12 +402,35 @@ def main():
         runtime_eval = eval_offset(img, s, runtime_dx, runtime_dy, truth_unw, truth_tp)
         runtime_now_dx, runtime_now_dy = choose_runtime_anchor_now(img, s)
         runtime_now_eval = eval_offset(img, s, runtime_now_dx, runtime_now_dy, truth_unw, truth_tp)
+        center_topo_anchor, center_topo_score, center_topo_parts = choose_anchor_center_topology(img, s)
+        ct_dx, ct_dy = center_topo_anchor
+        center_topo_eval = eval_offset(img, s, ct_dx, ct_dy, truth_unw, truth_tp)
+        edge_anchor, edge_score = choose_anchor_edge_distance(img, s)
+        ed_dx, ed_dy = edge_anchor
+        edge_eval = eval_offset(img, s, ed_dx, ed_dy, truth_unw, truth_tp)
+        raw_edge_anchor, raw_edge_score = choose_anchor_raw_boundary_distance(img, s)
+        re_dx, re_dy = raw_edge_anchor
+        raw_edge_eval = eval_offset(img, s, re_dx, re_dy, truth_unw, truth_tp)
         report["scales"][str(scale)] = {
             "frame": frame,
             "runtime_anchor": {"dx": runtime_dx, "dy": runtime_dy},
             "runtime_eval": runtime_eval,
             "runtime_now_anchor": {"dx": runtime_now_dx, "dy": runtime_now_dy},
             "runtime_now_eval": runtime_now_eval,
+            "center_topology_anchor": {"dx": ct_dx, "dy": ct_dy},
+            "center_topology_eval": center_topo_eval,
+            "center_topology_score": center_topo_score,
+            "center_topology_parts": {
+                "center_confidence": center_topo_parts[0],
+                "topology": center_topo_parts[1],
+                "center_bias": center_topo_parts[2],
+            },
+            "edge_anchor": {"dx": ed_dx, "dy": ed_dy},
+            "edge_eval": edge_eval,
+            "edge_score": edge_score,
+            "raw_edge_anchor": {"dx": re_dx, "dy": re_dy},
+            "raw_edge_eval": raw_edge_eval,
+            "raw_edge_score": raw_edge_score,
             "best_eval": best,
         }
 
@@ -238,6 +439,12 @@ def main():
             f"score={runtime_eval['score']:.3f} "
             f"| runtime_now(dx={runtime_now_dx},dy={runtime_now_dy}) "
             f"score={runtime_now_eval['score']:.3f} "
+            f"| center_topology(dx={ct_dx},dy={ct_dy}) "
+            f"score={center_topo_eval['score']:.3f} "
+            f"| edge(dx={ed_dx},dy={ed_dy}) "
+            f"score={edge_eval['score']:.3f} "
+            f"| raw_edge(dx={re_dx},dy={re_dy}) "
+            f"score={raw_edge_eval['score']:.3f} "
             f"| best(dx={best['dx']},dy={best['dy']}) score={best['score']:.3f} "
             f"f1_unw={best['f1_unwalkable']:.3f} f1_tp={best['f1_tp']:.3f}"
         )

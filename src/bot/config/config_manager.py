@@ -13,11 +13,13 @@ GUI_BOOL_KEYS = [
     "use_utito", 'use_haste', 'use_food',"use_lure_walk", "use_recenter", "use_kiting",
     "use_magic_shield", 
     "use_static_lure",
+    "use_auto_sell_stone",
 ]
 GUI_INT_KEYS = [
     "hp_thresh_high", "hp_thresh_low", "mp_thresh",
     "min_monsters_spell", "min_monsters_rune",
     "kill_amount", "kill_stop_amount","lure_walk_ms", "lure_stop_ms",
+    "auto_sell_stone_interval_s",
 ]
 GUI_STR_KEYS = ["party_leader", "waypoint_folder"]
 
@@ -32,6 +34,7 @@ BASE_SETTINGS = {
     "manual_loot": False,
     "cavebot": False,
     "use_static_lure": False,
+    "use_auto_sell_stone": False,
     "use_lure_walk": False,
     "lure_walk_ms": 600,
     "lure_stop_ms": 400,
@@ -56,6 +59,7 @@ BASE_SETTINGS = {
     "min_monsters_rune": 1,
     "kill_amount": 5,
     "kill_stop_amount": 1,
+    "auto_sell_stone_interval_s": 60,
 
     # strings
     "party_leader": "Mateogon",
@@ -77,6 +81,7 @@ BASE_SLOTS = {
     "magic_shield": None,
     "cancel_magic_shield": None,
     "area_rune": None,
+    "sell_stone": 22,
 
     "ring": None,
     "amulet": None,

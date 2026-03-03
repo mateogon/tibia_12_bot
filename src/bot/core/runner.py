@@ -125,6 +125,7 @@ class BotRunner:
             t0 = time.perf_counter(); self.bot.haste(); self.perf.add_span("haste", t0)
         if self.bot._bool_value(self.bot.use_food):
             t0 = time.perf_counter(); self.bot.eat(); self.perf.add_span("food", t0)
+        t0 = time.perf_counter(); self.bot.autoUseSellStone(); self.perf.add_span("sell_stone", t0)
         if self.bot.manage_equipment.get():
             t0 = time.perf_counter(); self.bot.manageEquipment(); self.perf.add_span("equipment", t0)
 

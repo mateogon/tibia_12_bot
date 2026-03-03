@@ -66,11 +66,13 @@ class ModernBotGUI:
             'use_recenter', 'use_kiting',
             'use_magic_shield',
             "use_static_lure",
+            "use_auto_sell_stone",
             "log_cavebot",
             "log_battlelist",
             "visualize_battlelist",
             "cavebot_record_interval_ms",
             "cavebot_record_zoom_label",
+            "auto_sell_stone_interval_s",
             "log_enabled", "log_actions", "log_perf",
         ]
         
@@ -142,14 +144,14 @@ class ModernBotGUI:
         self.tabs.add("Slots") 
         self.tabs.add("Cavebot")
         self.tabs.add("Map")
-        self.tabs.add("Settings")
+        self.tabs.add("Developer")
 
         self._build_combat_tab(self.tabs.tab("Combat"))
         self._build_healing_tab(self.tabs.tab("Healing"))
         self._build_slots_tab(self.tabs.tab("Slots")) 
         self._build_cavebot_tab(self.tabs.tab("Cavebot"))
         self._build_map_tab(self.tabs.tab("Map"))
-        self._build_settings_tab(self.tabs.tab("Settings"))
+        self._build_settings_tab(self.tabs.tab("Developer"))
 
         # 3. Footer
         footer = ctk.CTkFrame(self.root, height=40)
@@ -174,7 +176,6 @@ class ModernBotGUI:
 
         f_rune = self._create_section(scroll, "Area Runes (GFB/Ava)")
         self._switch(f_rune, "Enable Area Runes", "use_area_rune")
-        self._switch(f_rune, "Visualize Targeting (Debug)", "show_area_rune_target")
         self._entry_row(f_rune, "Min Monsters to Rune:", "min_monsters_for_rune")
 
         f_spells = self._create_section(scroll, "Area Spells")
@@ -183,6 +184,8 @@ class ModernBotGUI:
         f_tools = self._create_section(scroll, "Utility")
         self._switch(f_tools, "Use Haste", "use_haste")
         self._switch(f_tools, "Use Food", "use_food")
+        self._switch(f_tools, "Auto Use Sell Stone", "use_auto_sell_stone")
+        self._entry_row(f_tools, "Sell Stone Every (s):", "auto_sell_stone_interval_s")
         self._switch(f_tools, "Equip/Unequip Equipment", "manage_equipment")
 
         if self.vocation in ["druid", "sorcerer"]:
@@ -242,6 +245,7 @@ class ModernBotGUI:
         self._slot_entry(f_supp, "Magic Shield:", "magic_shield")
         self._slot_entry(f_supp, "Cancel Shield:", "cancel_magic_shield")
         self._slot_entry(f_supp, "Area Rune:", "area_rune")
+        self._slot_entry(f_supp, "Sell Stone:", "sell_stone")
 
         # 3. Equipment
         f_equip = self._create_section(scroll, "Equipment")
@@ -274,7 +278,6 @@ class ModernBotGUI:
         reset_btn.pack(side="right")
         if self.vocation == "knight":
             self._switch(f_nav, "Static Party Lure (Skull/Lock/etc)", "use_static_lure")
-        self._switch(f_nav, "Cavebot Debug Logs", "log_cavebot")
         # Follow logic (Now correctly placed inside Navigation before other sections start)
         self._switch(f_nav, "Follow Party Leader", "follow_party")
         self._entry_row(f_nav, "Party Leader Name:", "party_leader")
@@ -331,12 +334,25 @@ class ModernBotGUI:
         self.map_label.pack(fill="both", expand=True, padx=10, pady=10)
 
     def _build_settings_tab(self, parent):
-        f_logs = self._create_section(parent, "Debug Logging")
-        self._switch(f_logs, "Enable Debug Logging", "log_enabled")
-        self._switch(f_logs, "Action Click Logs", "log_actions")
-        self._switch(f_logs, "Performance Logs", "log_perf")
-        self._switch(f_logs, "Battle List Logs", "log_battlelist")
-        self._switch(f_logs, "Battle List Visual Debug", "visualize_battlelist")
+        f_logs = self._create_section(parent, "Debug Controls")
+        logs_grid = ctk.CTkFrame(f_logs, fg_color="transparent")
+        logs_grid.pack(fill="x", padx=8, pady=6)
+        col1 = ctk.CTkFrame(logs_grid, fg_color="transparent")
+        col2 = ctk.CTkFrame(logs_grid, fg_color="transparent")
+        col3 = ctk.CTkFrame(logs_grid, fg_color="transparent")
+        col1.pack(side="left", fill="both", expand=True, padx=4)
+        col2.pack(side="left", fill="both", expand=True, padx=4)
+        col3.pack(side="left", fill="both", expand=True, padx=4)
+
+        self._switch(col1, "Enable Debug Logging", "log_enabled")
+        self._switch(col1, "Action Click Logs", "log_actions")
+        self._switch(col1, "Performance Logs", "log_perf")
+
+        self._switch(col2, "Cavebot Debug Logs", "log_cavebot")
+        self._switch(col2, "Battle List Logs", "log_battlelist")
+        self._switch(col2, "Battle List Visual Debug", "visualize_battlelist")
+
+        self._switch(col3, "Bot Vision Debug (Game Screen)", "show_area_rune_target")
 
         f_lab = self._create_section(parent, "Cavebot Debug Lab")
         self.record_btn = ctk.CTkButton(
@@ -591,6 +607,7 @@ class ModernBotGUI:
             "kill_amount", "kill_stop_amount",
             "lure_walk_ms", "lure_stop_ms",
             "cavebot_record_interval_ms", "cavebot_record_zoom_label",
+            "auto_sell_stone_interval_s",
         }
 
         # 2) Sync GUI vars -> profile["settings"]

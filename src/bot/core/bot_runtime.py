@@ -236,6 +236,7 @@ class Bot:
         self.enable_boss_sequences = False
         self.last_walk_click_pos = None
         self.last_walk_click_ms = 0
+        self.last_auto_sell_stone_ms = 0
         self.equip_state_initialized = False
         self.equip_combat_state = False
         self.equip_state_since_ms = 0
@@ -324,6 +325,8 @@ class Bot:
         self.lure_walk_ms  = IntVar(value=int(s.get("lure_walk_ms", 600)))
         self.lure_stop_ms  = IntVar(value=int(s.get("lure_stop_ms", 400)))
         self.use_static_lure = BooleanVar(value=s.get("use_static_lure", False))
+        self.use_auto_sell_stone = BooleanVar(value=s.get("use_auto_sell_stone", False))
+        self.auto_sell_stone_interval_s = IntVar(value=int(s.get("auto_sell_stone_interval_s", 60)))
         self.use_recenter = BooleanVar(value=s.get("use_recenter", False))
         self.use_kiting   = BooleanVar(value=s.get("use_kiting", False))
         self.log_cavebot      = BooleanVar(value=s.get("log_cavebot", False))
@@ -1681,6 +1684,35 @@ class Bot:
             if not self.buffs['pz'] and self.buffs['hungry']:
                 # Skip cooldown check for food
                 self.clickActionbarSlot(slot, check_cooldown=False)
+
+    def autoUseSellStone(self):
+        if not self._bool_value(getattr(self, "use_auto_sell_stone", False)):
+            return
+        if self.buffs.get("pz", False):
+            return
+
+        slot = self.slots.get("sell_stone")
+        if slot is None:
+            return
+        try:
+            interval_s = int(self.auto_sell_stone_interval_s.get())
+        except Exception:
+            interval_s = 60
+        interval_ms = max(5, interval_s) * 1000
+
+        now_ms = timeInMillis()
+        if (now_ms - int(getattr(self, "last_auto_sell_stone_ms", 0))) < interval_ms:
+            return
+
+        clicks_sent = 0
+        for i in range(4):
+            if self.clickActionbarSlot(slot, check_cooldown=False, source="sell_stone"):
+                clicks_sent += 1
+            # Small spacing so the server/client can register repeated uses.
+            if i < 3:
+                time.sleep(0.05)
+        if clicks_sent > 0:
+            self.last_auto_sell_stone_ms = now_ms
     
     def shouldUtito(self,monster_count):
         b_x, b_y,_,b_y2 = self.s_BattleList.region
