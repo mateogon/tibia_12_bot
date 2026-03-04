@@ -4555,17 +4555,14 @@ class Bot:
         try:
             mh, mw = map_img.shape[:2]
             cx, cy = mw // 2, mh // 2
-            x_start, x_end = max(0, cx - 90), min(mw, cx + 90)
-            y_start, y_end = max(0, cy - 60), min(mh, cy + 60)
+            # Focus on center area near player cross: this is the most reliable
+            # discovered terrain zone and avoids large black chunks at map borders.
+            rx0, rx1 = max(0, cx - 84), min(mw, cx + 84)
+            ry0, ry1 = max(0, cy - 64), min(mh, cy + 64)
+            roi = map_img[ry0:ry1, rx0:rx1]
+            if roi is None or roi.size == 0:
+                return self.map_scale
 
-            strips = [
-                map_img[np.clip(cy - 40, 0, mh - 1), x_start:x_end],
-                map_img[np.clip(cy + 40, 0, mh - 1), x_start:x_end],
-                map_img[y_start:y_end, np.clip(cx + 45, 0, mw - 1)].reshape(-1, 3),
-                map_img[y_start:y_end, np.clip(cx - 45, 0, mw - 1)].reshape(-1, 3),
-            ]
-
-            # Precompute terrain color codes once (BGR -> packed int).
             if not hasattr(self, "_terrain_codes_u32"):
                 terrain = np.array(BotConstants.OBSTACLES + BotConstants.WALKABLE, dtype=np.uint8)
                 self._terrain_codes_u32 = (
@@ -4574,42 +4571,22 @@ class Bot:
                     | terrain[:, 2].astype(np.uint32)
                 )
 
-            def detect_scale_from_center_runwidth():
-                """
-                Center-focused estimator:
-                - Ignore black/unknown chunks by only accepting terrain colors.
-                - Measure same-color run widths on horizontal/vertical strips.
-                - Infer scale from dominant smallest reliable run width.
-                """
-                # Build strips near player cross only (high-confidence discovered area).
-                local_strips = []
-                y_offs = [-30, -18, -8, 0, 8, 18, 30]
-                x_offs = [-32, -20, -10, 0, 10, 20, 32]
-                for dy in y_offs:
-                    yy = int(np.clip(cy + dy, 0, mh - 1))
-                    xs0, xs1 = max(0, cx - 72), min(mw, cx + 72)
-                    strip = map_img[yy, xs0:xs1]
-                    if strip.size > 0:
-                        local_strips.append(strip)
-                for dx in x_offs:
-                    xx = int(np.clip(cx + dx, 0, mw - 1))
-                    ys0, ys1 = max(0, cy - 56), min(mh, cy + 56)
-                    strip = map_img[ys0:ys1, xx].reshape(-1, 3)
-                    if strip.size > 0:
-                        local_strips.append(strip)
-
-                run_lengths = []
-                for strip in local_strips:
-                    if strip.size == 0 or len(strip) < 3:
+            def accumulate_row_min_widths(img_rows):
+                width_counts = Counter()
+                for row in img_rows:
+                    if row.size == 0 or len(row) < 3:
                         continue
                     codes = (
-                        (strip[:, 0].astype(np.uint32) << 16)
-                        | (strip[:, 1].astype(np.uint32) << 8)
-                        | strip[:, 2].astype(np.uint32)
+                        (row[:, 0].astype(np.uint32) << 16)
+                        | (row[:, 1].astype(np.uint32) << 8)
+                        | row[:, 2].astype(np.uint32)
                     )
                     is_terrain = np.isin(codes, self._terrain_codes_u32, assume_unique=False)
-                    if int(np.count_nonzero(is_terrain)) < 6:
+                    # Ignore sparse/noisy rows (usually black/unknown dominated).
+                    if int(np.count_nonzero(is_terrain)) < max(10, int(len(row) * 0.18)):
                         continue
+
+                    runs = []
                     i = 0
                     n = len(codes)
                     while i < n:
@@ -4620,103 +4597,79 @@ class Bot:
                         j = i + 1
                         while j < n and is_terrain[j] and int(codes[j]) == c0:
                             j += 1
-                        ln = j - i
-                        # Keep plausible tile-width runs.
-                        if 1 <= ln <= 8:
-                            run_lengths.append(int(ln))
+                        ln = int(j - i)
+                        if 1 <= ln <= 10:
+                            runs.append(ln)
                         i = j
 
-                if len(run_lengths) < 12:
-                    return None
-
-                counts = Counter(run_lengths)
-                one_hits = int(counts.get(1, 0))
-                two_hits = int(counts.get(2, 0) + counts.get(3, 0))
-                four_hits = int(counts.get(4, 0) + counts.get(5, 0) + counts.get(6, 0))
-                total = int(sum(counts.values()))
-                if total <= 0:
-                    return None
-
-                # Strong x1 evidence must dominate.
-                if one_hits >= max(10, int(0.18 * total)) and one_hits >= int(1.20 * max(two_hits, four_hits)):
-                    return 1
-                # x2 evidence over x4/1.
-                if two_hits >= max(8, int(0.14 * total)) and two_hits >= int(0.90 * four_hits):
-                    return 2
-                # x4 needs enough 4-ish runs and low x1 pressure.
-                if four_hits >= max(6, int(0.10 * total)) and one_hits <= int(0.60 * four_hits):
-                    return 4
-                return None
-
-            def decide_scale(distances):
-                if len(distances) < 3:
-                    return None
-                counts = Counter(distances)
-                if counts[1] > 0 or counts[3] > 0:
-                    return 1
-                if counts[2] > 0 or counts[6] > 0:
-                    return 2
-                if counts[4] > 0:
-                    return 4
-                return None
-
-            # Fast path: vectorized terrain + edge spacing.
-            distances = []
-            for strip in strips:
-                if strip.size == 0 or len(strip) < 3:
-                    continue
-                codes = (
-                    (strip[:, 0].astype(np.uint32) << 16)
-                    | (strip[:, 1].astype(np.uint32) << 8)
-                    | strip[:, 2].astype(np.uint32)
-                )
-                is_terrain = np.isin(codes, self._terrain_codes_u32, assume_unique=False)
-                changed = np.any(strip[1:] != strip[:-1], axis=1)
-                valid = is_terrain[1:] & is_terrain[:-1] & changed
-                edge_idx = np.flatnonzero(valid) + 1
-                if edge_idx.size < 2:
-                    continue
-                diffs = np.diff(edge_idx)
-                diffs = diffs[(diffs >= 1) & (diffs <= 16)]
-                if diffs.size:
-                    distances.extend(diffs.tolist())
-
-            new_scale = decide_scale(distances)
-            run_scale = detect_scale_from_center_runwidth()
-
-            # If center run-width estimator is available and disagrees in black-heavy scenes,
-            # trust it because edge spacing is unstable with large black/undiscovered chunks.
-            center_roi = map_img[max(0, cy - 60):min(mh, cy + 60), max(0, cx - 80):min(mw, cx + 80)]
-            black_ratio = 0.0
-            if center_roi.size > 0:
-                black_mask = np.all(center_roi <= np.array([8, 8, 8], dtype=np.uint8), axis=-1)
-                black_ratio = float(np.mean(black_mask))
-            if run_scale is not None and (new_scale is None or (black_ratio >= 0.55 and int(run_scale) != int(new_scale))):
-                new_scale = int(run_scale)
-
-            # Safety fallback: old loop implementation only when vectorized path is ambiguous.
-            if new_scale is None:
-                terrain = np.array(BotConstants.OBSTACLES + BotConstants.WALKABLE, dtype=np.uint8)
-                distances = []
-                for strip in strips:
-                    if strip.size == 0:
+                    if not runs:
                         continue
-                    is_terrain = np.any(np.all(strip[:, None] == terrain, axis=-1), axis=-1)
-                    last_idx = -1
-                    for i in range(1, len(strip)):
-                        if is_terrain[i] and is_terrain[i - 1]:
-                            if not np.array_equal(strip[i], strip[i - 1]):
-                                if last_idx != -1:
-                                    d = i - last_idx
-                                    if 1 <= d <= 16:
-                                        distances.append(d)
-                                last_idx = i
-                new_scale = decide_scale(distances)
-                if new_scale is None and run_scale is not None:
-                    new_scale = int(run_scale)
 
-            if new_scale is None:
-                return self.map_scale
+                    # Robust row-min: prefer smallest run length that appears at least twice.
+                    # This suppresses isolated 1px noise segments.
+                    rc = Counter(runs)
+                    repeated = [k for k, v in rc.items() if v >= 2]
+                    row_width = min(repeated) if repeated else min(runs)
+                    width_counts[int(row_width)] += 1
+                return width_counts
+
+            # Horizontal + vertical scan (vertical via transpose) for stronger evidence.
+            rows_h = [roi[r, :, :] for r in range(roi.shape[0])]
+            roi_t = np.transpose(roi, (1, 0, 2))
+            rows_v = [roi_t[r, :, :] for r in range(roi_t.shape[0])]
+            widths = accumulate_row_min_widths(rows_h)
+            widths.update(accumulate_row_min_widths(rows_v))
+
+            total_votes = int(sum(widths.values()))
+            if total_votes < 8:
+                new_scale = self.map_scale
+                e1 = e2 = e4 = 0.0
+            else:
+                # Width evidence mapping to scale classes.
+                e1 = float(widths.get(1, 0))
+                # Important observation from live logs:
+                # - width 6 appears often on true x2, so count it mostly for x2.
+                e2 = (
+                    float(widths.get(2, 0))
+                    + 0.3 * float(widths.get(3, 0))
+                    + 0.9 * float(widths.get(6, 0))
+                )
+                e4 = (
+                    float(widths.get(4, 0))
+                    + 0.6 * float(widths.get(5, 0))
+                    + 0.15 * float(widths.get(6, 0))
+                    + 0.5 * float(widths.get(8, 0))
+                )
+
+                scores = [(1, e1), (2, e2), (4, e4)]
+                best_scale, best_score = max(scores, key=lambda kv: kv[1])
+                new_scale = int(best_scale) if best_score >= 3.0 else int(self.map_scale)
+
+                # Guard against common collapse of x2/x4 into x1 in noisy scenes.
+                if new_scale == 1:
+                    if e2 >= max(3.0, 0.75 * e1):
+                        new_scale = 2
+                    elif e4 >= max(3.0, 0.90 * e1):
+                        new_scale = 4
+                # Extra guard: prevent x2 -> x4 flip unless x4 evidence clearly dominates.
+                if int(self.map_scale) == 2 and new_scale == 4 and e4 < (1.15 * e2):
+                    new_scale = 2
+
+            # Diagnostic log: only under perf logging, throttled.
+            now_ms = timeInMillis()
+            should_log = (
+                self._is_log_enabled("perf")
+                and (now_ms - int(getattr(self, "last_zoom_widths_log_ms", 0))) >= 600
+            )
+            if should_log:
+                self.last_zoom_widths_log_ms = now_ms
+                print(
+                    "[ZOOM WIDTHS] "
+                    f"[1]:{int(widths.get(1, 0))} [2]:{int(widths.get(2, 0))} "
+                    f"[4]:{int(widths.get(4, 0))} [6]:{int(widths.get(6, 0))} "
+                    f"[8]:{int(widths.get(8, 0))} | "
+                    f"E1={e1:.1f} E2={e2:.1f} E4={e4:.1f} -> {int(new_scale)}"
+                )
 
             if new_scale != self.map_scale:
                 print(f"[AUTO-SCALE] Instant switch detected: {new_scale}px/tile")
@@ -4735,6 +4688,70 @@ class Bot:
         diff = np.abs(map_img.astype(np.int16) - target)
         return np.all(diff <= int(max(0, tol)), axis=-1)
 
+    def _refine_local_yellow_tiles(self, local_data, is_yellow, scale):
+        """
+        Reduce yellow false-positives near true TP tiles (mostly x1/x2 spill).
+        Strategy: for each connected yellow component, keep the strongest tile.
+        """
+        if is_yellow is None:
+            return is_yellow
+        out = np.array(is_yellow, copy=True)
+        s = int(max(1, scale))
+        if s >= 4:
+            return out
+
+        h, w = out.shape
+        visited = np.zeros((h, w), dtype=bool)
+        dirs8 = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+        dirs4 = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+        target_y = np.array(self.COLOR_TP_BGR, dtype=np.int16)
+        target_r = np.array(self.COLOR_RED_TILE_BGR, dtype=np.int16)
+
+        def red_neighbors(rr, cc):
+            cnt = 0
+            for dr, dc in dirs4:
+                nr, nc = rr + dr, cc + dc
+                if 0 <= nr < h and 0 <= nc < w:
+                    d = np.abs(local_data[nr, nc].astype(np.int16) - target_r)
+                    if int(np.sum(d)) <= 18:
+                        cnt += 1
+            return cnt
+
+        for r in range(h):
+            for c in range(w):
+                if not out[r, c] or visited[r, c]:
+                    continue
+                comp = []
+                stack = [(r, c)]
+                visited[r, c] = True
+                while stack:
+                    cr, cc = stack.pop()
+                    comp.append((cr, cc))
+                    for dr, dc in dirs8:
+                        nr, nc = cr + dr, cc + dc
+                        if 0 <= nr < h and 0 <= nc < w and out[nr, nc] and not visited[nr, nc]:
+                            visited[nr, nc] = True
+                            stack.append((nr, nc))
+
+                if len(comp) <= 1:
+                    continue
+
+                best_rc = None
+                best_score = None
+                for rr, cc in comp:
+                    ydiff = int(np.sum(np.abs(local_data[rr, cc].astype(np.int16) - target_y)))
+                    rnb = red_neighbors(rr, cc)
+                    # Prefer tiles with red support around and purer yellow center color.
+                    score = (rnb * 100) - ydiff
+                    if best_score is None or score > best_score:
+                        best_score = score
+                        best_rc = (rr, cc)
+
+                for rr, cc in comp:
+                    out[rr, cc] = (rr, cc) == best_rc
+
+        return out
+
     def _sample_minimap_grid(self, map_img, S):
         """
         Samples 15x11 minimap points with anchor search to avoid phase shifts.
@@ -4742,6 +4759,14 @@ class Bot:
         """
         mh, mw = map_img.shape[:2]
         base_cx, base_cy = mw // 2, mh // 2
+        # Empirical per-zoom pixel alignment from offline zoom-set benchmarks.
+        # These are pixel shifts in minimap space (not tile shifts).
+        if int(S) == 1:
+            base_cx += 0
+            base_cy += 1
+        elif int(S) == 2:
+            base_cx += -1
+            base_cy += 1
         s = int(max(1, S))
 
         if not hasattr(self, "_terrain_codes_u32"):
@@ -5029,13 +5054,14 @@ class Bot:
 
         return is_obstacle, is_yellow
 
-    def _extract_tile_sets_from_local_data(self, local_data):
+    def _extract_tile_sets_from_local_data(self, local_data, scale=2):
         """Returns unwalkable/tp tile sets from 15x11 sampled minimap data."""
         OBS = np.array(BotConstants.OBSTACLES, dtype=np.uint8)
         LOW_CONF_OBS = np.array(getattr(BotConstants, "LOW_CONF_OBSTACLES", []), dtype=np.uint8)
         is_obstacle = np.zeros((11, 15), dtype=bool)
         is_low_conf = np.zeros((11, 15), dtype=bool)
         is_yellow = self._yellow_mask_bgr(local_data, tol=12)
+        is_yellow = self._refine_local_yellow_tiles(local_data, is_yellow, scale=scale)
 
         for r in range(11):
             for c in range(15):
@@ -5076,7 +5102,7 @@ class Bot:
 
     def _extract_tile_sets_from_map(self, map_img, scale):
         local_data, _cx, _cy, dx, dy = self._sample_minimap_grid(map_img, scale)
-        unwalkable, tp = self._extract_tile_sets_from_local_data(local_data)
+        unwalkable, tp = self._extract_tile_sets_from_local_data(local_data, scale=scale)
         return {
             "unwalkable": sorted([[int(r), int(c)] for (r, c) in unwalkable]),
             "tp": sorted([[int(r), int(c)] for (r, c) in tp]),
@@ -5085,19 +5111,36 @@ class Bot:
         }
 
     def get_local_collision_map(self):
+        t_all0 = time.perf_counter()
+        t0 = time.perf_counter()
         map_img = img.screengrab_array(self.hwnd, self.s_Map.region)
+        t_capture_ms = (time.perf_counter() - t0) * 1000.0
         if map_img is None: 
             return None, self.map_scale
 
-        # Keep zoom in sync with the exact minimap frame used for collision extraction.
-        # This avoids stale scale state when periodic scale updates are delayed/missed.
-        try:
-            self.map_scale = int(self.detect_minimap_scale(map_img))
-        except Exception:
-            pass
+        # Keep zoom in sync with minimap, but avoid re-detecting every frame.
+        # Zoom changes are infrequent; periodic checks reduce collision-path cost.
+        now_ms = timeInMillis()
+        t_scale_ms = 0.0
+        if (now_ms - int(getattr(self, "last_scale_check", 0))) >= 300:
+            ts0 = time.perf_counter()
+            try:
+                self.map_scale = int(self.detect_minimap_scale(map_img))
+            except Exception:
+                pass
+            t_scale_ms = (time.perf_counter() - ts0) * 1000.0
+            self.last_scale_check = now_ms
         S = int(max(1, self.map_scale))
+        ts0 = time.perf_counter()
         mh, mw = map_img.shape[:2]
         cx, cy = self._resolve_minimap_sampling_center(map_img, S)
+        # Same empirical per-zoom alignment used by offline zoom-set benchmarks.
+        if int(S) == 1:
+            cx += 0
+            cy += 0
+        elif int(S) == 2:
+            cx += -1
+            cy += 1
         # Runtime path: use resolved center directly to avoid phase-jump tile shifts.
         local_data = np.zeros((11, 15, 3), dtype=np.uint8)
         for r in range(11):
@@ -5109,31 +5152,48 @@ class Bot:
                     local_data[r, c] = [0, 0, 0]
         self.minimap_grid_anchor_dx = 0
         self.minimap_grid_anchor_dy = 0
+        t_sample_ms = (time.perf_counter() - ts0) * 1000.0
         
-        # 1. Prepare Obstacle Data (The Blacklist)
-        OBS = np.array(BotConstants.OBSTACLES, dtype=np.uint8)
-        LOW_CONF_OBS = np.array(getattr(BotConstants, "LOW_CONF_OBSTACLES", []), dtype=np.uint8)
-        
-        # 3. Terrain Check:
-        # - Strong obstacles: always blocked.
-        # - Low-confidence obstacles: blocked only when part of small clusters (1-3 tiles).
-        is_obstacle = np.zeros((11, 15), dtype=bool)
-        is_low_conf = np.zeros((11, 15), dtype=bool)
-        is_yellow = self._yellow_mask_bgr(local_data, tol=12)
-        for r in range(11):
-            for c in range(15):
-                color = local_data[r, c]
-                # If the sampled pixel matches ANY known obstacle color exactly
-                if np.any(np.all(color == OBS, axis=-1)):
-                    is_obstacle[r, c] = True
-                else:
-                    is_obstacle[r, c] = False
-                if LOW_CONF_OBS.size > 0 and np.any(np.all(color == LOW_CONF_OBS, axis=-1)):
-                    is_low_conf[r, c] = True
-                if is_yellow[r, c]:
-                    is_obstacle[r, c] = False
-                    is_low_conf[r, c] = False
+        # 1. Prepare obstacle code caches (packed u32 BGR).
+        if not hasattr(self, "_obs_codes_u32"):
+            obs = np.array(BotConstants.OBSTACLES, dtype=np.uint8)
+            self._obs_codes_u32 = (
+                (obs[:, 0].astype(np.uint32) << 16)
+                | (obs[:, 1].astype(np.uint32) << 8)
+                | obs[:, 2].astype(np.uint32)
+            )
+        if not hasattr(self, "_low_conf_obs_codes_u32"):
+            low_obs = np.array(getattr(BotConstants, "LOW_CONF_OBSTACLES", []), dtype=np.uint8)
+            if low_obs.size > 0:
+                self._low_conf_obs_codes_u32 = (
+                    (low_obs[:, 0].astype(np.uint32) << 16)
+                    | (low_obs[:, 1].astype(np.uint32) << 8)
+                    | low_obs[:, 2].astype(np.uint32)
+                )
+            else:
+                self._low_conf_obs_codes_u32 = np.array([], dtype=np.uint32)
 
+        # 3. Terrain check (vectorized):
+        # - Strong obstacles: always blocked.
+        # - Low-confidence obstacles: blocked only when part of small clusters (<=3).
+        is_yellow = self._yellow_mask_bgr(local_data, tol=12)
+        is_yellow = self._refine_local_yellow_tiles(local_data, is_yellow, scale=S)
+        ts0 = time.perf_counter()
+        codes = (
+            (local_data[:, :, 0].astype(np.uint32) << 16)
+            | (local_data[:, :, 1].astype(np.uint32) << 8)
+            | local_data[:, :, 2].astype(np.uint32)
+        )
+        is_obstacle = np.isin(codes, self._obs_codes_u32, assume_unique=False)
+        if self._low_conf_obs_codes_u32.size > 0:
+            is_low_conf = np.isin(codes, self._low_conf_obs_codes_u32, assume_unique=False)
+        else:
+            is_low_conf = np.zeros((11, 15), dtype=bool)
+        is_obstacle[is_yellow] = False
+        is_low_conf[is_yellow] = False
+        t_classify_ms = (time.perf_counter() - ts0) * 1000.0
+
+        ts0 = time.perf_counter()
         is_obstacle, is_yellow = self._apply_minimap_tile_memory(
             map_img=map_img,
             local_data=local_data,
@@ -5141,9 +5201,11 @@ class Bot:
             is_yellow=is_yellow,
             scale=S,
         )
+        t_memory_ms = (time.perf_counter() - ts0) * 1000.0
 
         # Low-confidence cluster heuristic:
         # Treat as blocked only if connected cluster size is small (<=3 tiles).
+        ts0 = time.perf_counter()
         visited = np.zeros((11, 15), dtype=bool)
         dirs = [(-1, 0), (1, 0), (0, -1), (0, 1)]
         for r in range(11):
@@ -5167,8 +5229,10 @@ class Bot:
                 if len(comp) <= 3:
                     for cr, cc in comp:
                         is_obstacle[cr, cc] = True
+        t_lowconf_ms = (time.perf_counter() - ts0) * 1000.0
 
         # 4. Initialize Grid
+        ts0 = time.perf_counter()
         grid = np.zeros((11, 15), dtype=int)
         grid[is_obstacle] = 1
         grid[5, 7] = 3 # Player tile constant
@@ -5210,6 +5274,24 @@ class Bot:
             if is_obstacle[7, 7] and grid[6, 6] == 1 and grid[6, 8] == 1: grid[6, 7] = 1
             if is_obstacle[5, 5] and grid[4, 6] == 1 and grid[6, 6] == 1: grid[5, 6] = 1
             if is_obstacle[5, 9] and grid[4, 8] == 1 and grid[6, 8] == 1: grid[5, 8] = 1
+        t_grid_ms = (time.perf_counter() - ts0) * 1000.0
+
+        t_total_ms = (time.perf_counter() - t_all0) * 1000.0
+        if self._is_log_enabled("perf"):
+            now_ms2 = timeInMillis()
+            if (now_ms2 - int(getattr(self, "last_collision_map_breakdown_log_ms", 0))) >= 800:
+                self.last_collision_map_breakdown_log_ms = now_ms2
+                print(
+                    "[PERF] collision_map_breakdown "
+                    f"total={t_total_ms:.2f}ms "
+                    f"capture={t_capture_ms:.2f}ms "
+                    f"scale={t_scale_ms:.2f}ms "
+                    f"sample={t_sample_ms:.2f}ms "
+                    f"classify={t_classify_ms:.2f}ms "
+                    f"memory={t_memory_ms:.2f}ms "
+                    f"low_conf={t_lowconf_ms:.2f}ms "
+                    f"grid_interp={t_grid_ms:.2f}ms"
+                )
 
         return grid, S
     def get_player_grid_pos(self):  
@@ -5250,8 +5332,16 @@ class Bot:
                 for gr, gc in zip(ys.tolist(), xs.tolist()):
                     tp_tiles.add((int(gr), int(gc)))
             mem_y = getattr(self, "minimap_yellow_memory", None)
-            if mem_y is not None and isinstance(mem_y, np.ndarray) and mem_y.shape == (11, 15):
-                ys, xs = np.where(mem_y == 1)
+            if (
+                mem_y is not None
+                and isinstance(mem_y, np.ndarray)
+                and mem_y.shape == (11, 15)
+                and map_img is not None
+            ):
+                # Match runtime collision policy: memory yellow only recovers
+                # potentially cross-occluded center cells, not the whole map.
+                occluded = self._detect_cross_occluded_tiles(local_data, s)
+                ys, xs = np.where((mem_y == 1) & occluded)
                 for gr, gc in zip(ys.tolist(), xs.tolist()):
                     tp_tiles.add((int(gr), int(gc)))
 

@@ -850,7 +850,7 @@
                 "cavebot_record_zoom_label": 0,
                 "log_enabled": true,
                 "log_actions": false,
-                "log_perf": false,
+                "log_perf": true,
                 "use_auto_sell_stone": true,
                 "auto_sell_stone_interval_s": 60,
                 "unwalkable_sync_gold": true,

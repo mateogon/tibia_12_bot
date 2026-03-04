@@ -10,9 +10,14 @@ Workflow:
 import argparse
 import json
 import os
+import sys
 
 import cv2
 import numpy as np
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 from src.config.constants import BotConstants
 
@@ -73,6 +78,18 @@ def choose_runtime_anchor_now(map_img, scale):
             best_score = score
             best = (int(dx), int(dy))
     return best
+
+
+def choose_runtime_anchor_bot_current(scale):
+    """
+    Mirror current bot runtime hardcoded minimap sampling offsets.
+    """
+    s = int(max(1, scale))
+    if s == 1:
+        return (0, 1)
+    if s == 2:
+        return (-1, 1)
+    return (0, 0)
 
 
 def _center_confidence_score(local_data, scale):
@@ -402,6 +419,8 @@ def main():
         runtime_eval = eval_offset(img, s, runtime_dx, runtime_dy, truth_unw, truth_tp)
         runtime_now_dx, runtime_now_dy = choose_runtime_anchor_now(img, s)
         runtime_now_eval = eval_offset(img, s, runtime_now_dx, runtime_now_dy, truth_unw, truth_tp)
+        runtime_bot_dx, runtime_bot_dy = choose_runtime_anchor_bot_current(s)
+        runtime_bot_eval = eval_offset(img, s, runtime_bot_dx, runtime_bot_dy, truth_unw, truth_tp)
         center_topo_anchor, center_topo_score, center_topo_parts = choose_anchor_center_topology(img, s)
         ct_dx, ct_dy = center_topo_anchor
         center_topo_eval = eval_offset(img, s, ct_dx, ct_dy, truth_unw, truth_tp)
@@ -417,6 +436,8 @@ def main():
             "runtime_eval": runtime_eval,
             "runtime_now_anchor": {"dx": runtime_now_dx, "dy": runtime_now_dy},
             "runtime_now_eval": runtime_now_eval,
+            "runtime_bot_anchor": {"dx": runtime_bot_dx, "dy": runtime_bot_dy},
+            "runtime_bot_eval": runtime_bot_eval,
             "center_topology_anchor": {"dx": ct_dx, "dy": ct_dy},
             "center_topology_eval": center_topo_eval,
             "center_topology_score": center_topo_score,
@@ -439,6 +460,8 @@ def main():
             f"score={runtime_eval['score']:.3f} "
             f"| runtime_now(dx={runtime_now_dx},dy={runtime_now_dy}) "
             f"score={runtime_now_eval['score']:.3f} "
+            f"| runtime_bot(dx={runtime_bot_dx},dy={runtime_bot_dy}) "
+            f"score={runtime_bot_eval['score']:.3f} "
             f"| center_topology(dx={ct_dx},dy={ct_dy}) "
             f"score={center_topo_eval['score']:.3f} "
             f"| edge(dx={ed_dx},dy={ed_dy}) "

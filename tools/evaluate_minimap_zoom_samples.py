@@ -260,6 +260,7 @@ def _detect_runtime_current_emulated(map_img: np.ndarray, prev_scale: int) -> in
     try:
         mh, mw = map_img.shape[:2]
         cx, cy = mw // 2, mh // 2
+        
         x_start, x_end = max(0, cx - 90), min(mw, cx + 90)
         y_start, y_end = max(0, cy - 60), min(mh, cy + 60)
         strips = [
@@ -269,96 +270,33 @@ def _detect_runtime_current_emulated(map_img: np.ndarray, prev_scale: int) -> in
             map_img[y_start:y_end, np.clip(cx - 45, 0, mw - 1)].reshape(-1, 3),
         ]
 
-        def decide_scale(distances):
-            if len(distances) < 3:
-                return None
-            counts = collections.Counter(distances)
-            if counts[1] > 0 or counts[3] > 0:
-                return 1
-            if counts[2] > 0 or counts[6] > 0:
-                return 2
-            if counts[4] > 0:
-                return 4
-            return None
-
-        def detect_scale_from_center_runwidth():
-            local_strips = []
-            y_offs = [-30, -18, -8, 0, 8, 18, 30]
-            x_offs = [-32, -20, -10, 0, 10, 20, 32]
-            for dy in y_offs:
-                yy = int(np.clip(cy + dy, 0, mh - 1))
-                xs0, xs1 = max(0, cx - 72), min(mw, cx + 72)
-                strip = map_img[yy, xs0:xs1]
-                if strip.size > 0:
-                    local_strips.append(strip)
-            for dx in x_offs:
-                xx = int(np.clip(cx + dx, 0, mw - 1))
-                ys0, ys1 = max(0, cy - 56), min(mh, cy + 56)
-                strip = map_img[ys0:ys1, xx].reshape(-1, 3)
-                if strip.size > 0:
-                    local_strips.append(strip)
-
-            run_lengths = []
-            for strip in local_strips:
-                if strip.size == 0 or len(strip) < 3:
-                    continue
-                codes = (
-                    (strip[:, 0].astype(np.uint32) << 16)
-                    | (strip[:, 1].astype(np.uint32) << 8)
-                    | strip[:, 2].astype(np.uint32)
-                )
-                is_terrain = np.isin(codes, TERRAIN_CODES, assume_unique=False)
-                if int(np.count_nonzero(is_terrain)) < 6:
-                    continue
-                i = 0
-                n = len(codes)
-                while i < n:
-                    if not is_terrain[i]:
-                        i += 1
-                        continue
-                    c0 = int(codes[i])
-                    j = i + 1
-                    while j < n and is_terrain[j] and int(codes[j]) == c0:
-                        j += 1
-                    ln = j - i
-                    if 1 <= ln <= 8:
-                        run_lengths.append(int(ln))
-                    i = j
-            if len(run_lengths) < 12:
-                return None
-            counts = collections.Counter(run_lengths)
-            one_hits = int(counts.get(1, 0))
-            two_hits = int(counts.get(2, 0) + counts.get(3, 0))
-            four_hits = int(counts.get(4, 0) + counts.get(5, 0) + counts.get(6, 0))
-            total = int(sum(counts.values()))
-            if total <= 0:
-                return None
-            if one_hits >= max(10, int(0.18 * total)) and one_hits >= int(1.20 * max(two_hits, four_hits)):
-                return 1
-            if two_hits >= max(8, int(0.14 * total)) and two_hits >= int(0.90 * four_hits):
-                return 2
-            if four_hits >= max(6, int(0.10 * total)) and one_hits <= int(0.60 * four_hits):
-                return 4
-            return None
-
-        distances = _dist_terrain_vec(strips)
-        new_scale = decide_scale(distances)
-        run_scale = detect_scale_from_center_runwidth()
-        center_roi = map_img[max(0, cy - 60):min(mh, cy + 60), max(0, cx - 80):min(mw, cx + 80)]
-        black_ratio = 0.0
-        if center_roi.size > 0:
-            black_mask = np.all(center_roi <= np.array([8, 8, 8], dtype=np.uint8), axis=-1)
-            black_ratio = float(np.mean(black_mask))
-        if run_scale is not None and (new_scale is None or (black_ratio >= 0.55 and int(run_scale) != int(new_scale))):
-            new_scale = int(run_scale)
-        if new_scale is None:
-            distances2 = _dist_terrain_loop(strips)
-            new_scale = decide_scale(distances2)
-            if new_scale is None and run_scale is not None:
-                new_scale = int(run_scale)
-        if new_scale is None:
+        def get_color_runs(strips):
+            counts = {1:0, 2:0, 4:0}
+            for strip in strips:
+                if strip.size == 0 or len(strip) < 3: continue
+                rows = [strip] if strip.ndim == 2 else strip
+                for row in rows:
+                    if row.size == 0: continue
+                    changed = np.concatenate(([True], np.any(row[1:] != row[:-1], axis=1), [True]))
+                    idx = np.flatnonzero(changed)
+                    runs = np.diff(idx)
+                    for r in runs:
+                        if r in counts:
+                            counts[r] += 1
+            return counts
+            
+        runs = get_color_runs(strips)
+        s1 = runs[1] * 1.2
+        s2 = runs[2] * 2.5
+        s4 = runs[4] * 3.0
+        
+        scores = [(1, s1), (2, s2), (4, s4)]
+        best_scale, best_score = max(scores, key=lambda kv: kv[1])
+        
+        if best_score < 20:
             return int(prev_scale)
-        return int(new_scale)
+        return int(best_scale)
+        
     except Exception:
         return int(prev_scale)
 
