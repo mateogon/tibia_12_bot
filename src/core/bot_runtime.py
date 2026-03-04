@@ -170,8 +170,15 @@ class Bot:
         self.monster_queue = deque([0]*10, maxlen=10)
         self.monster_queue_time = 0
         self.monster_count = 0
+        self.monster_count_battlelist = 0
+        self.monster_count_screen = 0
+        self.monster_count_reachable = 0
+        self.monster_count_unreachable = 0
+        self.monster_count_effective = 0
         self.party, self.party_positions = {}, []
         self.monster_positions = []
+        self.monster_positions_reachable = []
+        self.monster_positions_unreachable = []
         self.last_monster_detection_debug_image = None
         self.monsters_around = 0
         self.buffs = {}
@@ -242,6 +249,9 @@ class Bot:
         self.equip_state_since_ms = 0
         self.equip_last_click_by_slot = {}
         self.next_mark_eligible_ms = 0
+        self.only_visited_last_mark = None
+        self.only_visited_streak = 0
+        self.only_visited_confirm_scans = 3
         # Cavebot progression tuning (from offline replay harness).
         self.cavebot_arrival_threshold_px = 4.0
         self.cavebot_arrival_confirm_frames = 2
@@ -271,6 +281,17 @@ class Bot:
         self.minimap_zoom_stable_frames = 0
         self.minimap_zoom_required_stable_frames = 3
         self.minimap_zoom_true_tiles = {"unwalkable": [], "tp": []}
+        self.minimap_zoom_sync_group = None
+        self.minimap_tile_memory = np.full((11, 15), -1, dtype=np.int8)  # -1 unknown, 0 walkable, 1 blocked
+        self.minimap_yellow_memory = np.full((11, 15), -1, dtype=np.int8)  # -1 unknown, 0 not yellow, 1 yellow
+        self.minimap_memory_prev_map = None
+        self.minimap_memory_prev_scale = 0
+        self.minimap_memory_last_ms = 0.0
+        self.minimap_memory_occluded_count = 0
+        self.minimap_memory_recovered_count = 0
+        self.minimap_memory_recovered_yellow_count = 0
+        self.minimap_memory_shift_rc = (0, 0)
+        self.last_minimap_memory_log_ms = 0
         self.visualize_pause_until_ms = 0
         self.visualize_window_alive = False
         self.last_battlelist_log_ms = 0
@@ -334,6 +355,7 @@ class Bot:
         self.visualize_battlelist = BooleanVar(value=s.get("visualize_battlelist", False))
         self.cavebot_record_interval_ms = IntVar(value=int(s.get("cavebot_record_interval_ms", 120)))
         self.cavebot_record_zoom_label = IntVar(value=int(s.get("cavebot_record_zoom_label", 0)))
+        self.auto_zoom_capture_unwalkable = BooleanVar(value=s.get("auto_zoom_capture_unwalkable", True))
         self.follow_party     = BooleanVar(value=s.get("follow_party", False))
         self.manual_loot      = BooleanVar(value=s.get("manual_loot", False))
         self.loot_on_spot     = BooleanVar(value=s.get("loot_on_spot", False))
@@ -349,6 +371,7 @@ class Bot:
         self.log_enabled      = BooleanVar(value=s.get("log_enabled", True))
         self.log_actions      = BooleanVar(value=s.get("log_actions", False))
         self.log_perf         = BooleanVar(value=s.get("log_perf", False))
+        self.unwalkable_sync_gold = BooleanVar(value=s.get("unwalkable_sync_gold", False))
 
         self.hp_thresh_high        = IntVar(value=int(s.get("hp_thresh_high", 90)))
         self.hp_thresh_low         = IntVar(value=int(s.get("hp_thresh_low", 70)))
@@ -681,9 +704,16 @@ class Bot:
         os.makedirs(base, exist_ok=True)
         return base
 
+    def _ensure_minimap_zoom_samples_dir(self):
+        base = os.path.join(self.base_directory, "training_data", "minimap_zoom_samples")
+        os.makedirs(base, exist_ok=True)
+        return base
+
     def start_minimap_zoom_recording(self, session_name=None):
         if self.minimap_zoom_recording:
             return
+        if not session_name:
+            session_name = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         base = self._ensure_minimap_zoom_recording_dir(session_name=session_name)
         self.minimap_zoom_session_dir = base
         self.minimap_zoom_captured = {}
@@ -692,9 +722,11 @@ class Bot:
         self.minimap_zoom_stable_scale = None
         self.minimap_zoom_stable_frames = 0
         self.minimap_zoom_true_tiles = {"unwalkable": [], "tp": []}
+        self.minimap_zoom_sync_group = str(session_name)
         self.minimap_zoom_recording = True
         targets = ",".join(str(v) for v in self.minimap_zoom_target_scales)
-        print(f"[ZOOM CAPTURE] started: {base} (targets={targets})")
+        auto_unw = bool(self._bool_value(getattr(self, "auto_zoom_capture_unwalkable", True)))
+        print(f"[ZOOM CAPTURE] started: {base} (targets={targets}, save_unw={auto_unw})")
 
     def stop_minimap_zoom_recording(self, reason="manual_stop"):
         if not self.minimap_zoom_recording:
@@ -719,6 +751,8 @@ class Bot:
                 "target_scales": list(self.minimap_zoom_target_scales),
                 "captured_order": [int(v) for v in self.minimap_zoom_captured_order],
                 "x4_truth": dict(self.minimap_zoom_true_tiles),
+                "save_unwalkable_samples": bool(self._bool_value(getattr(self, "auto_zoom_capture_unwalkable", True))),
+                "sync_group": self.minimap_zoom_sync_group,
                 "scales": scales_out,
             }
             try:
@@ -729,6 +763,7 @@ class Bot:
                 print(f"[ZOOM CAPTURE] metadata write failed: {e}")
         captured = sorted(self.minimap_zoom_captured.keys())
         print(f"[ZOOM CAPTURE] stopped: reason={reason} captured={captured}")
+        self.minimap_zoom_sync_group = None
 
     def toggle_minimap_zoom_recording(self):
         if self.minimap_zoom_recording:
@@ -738,6 +773,90 @@ class Bot:
 
     def is_minimap_zoom_recording(self):
         return bool(self.minimap_zoom_recording)
+
+    def capture_minimap_zoom_sample(self, manual_zoom=None, note=""):
+        """
+        Save one minimap frame + manual zoom label for zoom-detector evaluation.
+        Output:
+          training_data/minimap_zoom_samples/<timestamp>_minimap.png
+          training_data/minimap_zoom_samples/<timestamp>.json
+        """
+        map_img = img.screengrab_array(self.hwnd, self.s_Map.region)
+        if map_img is None:
+            print("[ZOOM SAMPLE] Failed to capture minimap image.")
+            return
+
+        out_dir = self._ensure_minimap_zoom_samples_dir()
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        img_name = f"{ts}_minimap.png"
+        json_name = f"{ts}.json"
+        img_path = os.path.join(out_dir, img_name)
+        json_path = os.path.join(out_dir, json_name)
+
+        if manual_zoom is None:
+            try:
+                manual_zoom = int(self.cavebot_record_zoom_label.get())
+            except Exception:
+                manual_zoom = 0
+        manual_zoom = int(manual_zoom)
+        if manual_zoom not in (0, 1, 2, 4):
+            manual_zoom = 0
+
+        try:
+            detected_zoom = int(self.detect_minimap_scale(map_img))
+            detect_source = "detect_minimap_scale"
+        except Exception:
+            detected_zoom = int(max(1, getattr(self, "map_scale", 2)))
+            detect_source = "runtime_fallback"
+        detected_zoom = int(max(1, detected_zoom))
+
+        # Diagnostics for known failure mode: mostly-black minimap.
+        px = map_img.astype(np.uint8)
+        black_mask = np.all(px <= np.array([8, 8, 8], dtype=np.uint8), axis=-1)
+        black_ratio = float(np.mean(black_mask)) if black_mask.size else 0.0
+
+        if not hasattr(self, "_terrain_codes_u32"):
+            terrain = np.array(BotConstants.OBSTACLES + BotConstants.WALKABLE, dtype=np.uint8)
+            self._terrain_codes_u32 = (
+                (terrain[:, 0].astype(np.uint32) << 16)
+                | (terrain[:, 1].astype(np.uint32) << 8)
+                | terrain[:, 2].astype(np.uint32)
+            )
+        codes = (
+            (px[:, :, 0].astype(np.uint32) << 16)
+            | (px[:, :, 1].astype(np.uint32) << 8)
+            | px[:, :, 2].astype(np.uint32)
+        )
+        terrain_ratio = float(np.mean(np.isin(codes, self._terrain_codes_u32, assume_unique=False))) if codes.size else 0.0
+
+        ok = (manual_zoom == 0) or (manual_zoom == detected_zoom)
+        cv2.imwrite(img_path, map_img)
+
+        meta = {
+            "session_type": "minimap_zoom_sample",
+            "timestamp": ts,
+            "image_file": img_name,
+            "manual_zoom_level": int(manual_zoom),
+            "detected_zoom_level": int(detected_zoom),
+            "detector_source": detect_source,
+            "detected_matches_manual": bool(ok),
+            "black_ratio": float(black_ratio),
+            "terrain_ratio": float(terrain_ratio),
+            "map_region": [int(v) for v in self.s_Map.region],
+            "map_scale_runtime": int(max(1, getattr(self, "map_scale", detected_zoom))),
+            "note": str(note or ""),
+            "sync_gold": bool(self._bool_value(getattr(self, "unwalkable_sync_gold", False))),
+            "quality_tag": "sync_gold" if bool(self._bool_value(getattr(self, "unwalkable_sync_gold", False))) else "regular",
+        }
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2, ensure_ascii=True)
+
+        status = "OK" if ok else "MISMATCH"
+        print(
+            f"[ZOOM SAMPLE] Saved {json_name} "
+            f"(manual={manual_zoom} detected={detected_zoom} {status} "
+            f"black={black_ratio:.3f} terrain={terrain_ratio:.3f})"
+        )
 
     def record_minimap_zoom_tick(self):
         if not self.minimap_zoom_recording:
@@ -763,6 +882,9 @@ class Bot:
 
         map_img = img.screengrab_array(self.hwnd, self.s_Map.region)
         if map_img is None:
+            return
+        game_img = img.screengrab_array(self.hwnd, self.s_GameScreen.region)
+        if game_img is None:
             return
         if not self.minimap_zoom_session_dir:
             return
@@ -792,6 +914,23 @@ class Bot:
             f"stable_frames={self.minimap_zoom_stable_frames} "
             f"tiles: unwalkable={len(tile_info.get('unwalkable', []))} tp={len(tile_info.get('tp', []))}"
         )
+
+        if bool(self._bool_value(getattr(self, "auto_zoom_capture_unwalkable", True))):
+            self._save_unwalkable_sample_from_frames(
+                game_img=game_img,
+                map_img=map_img,
+                scale=scale,
+                scale_source="runtime_map_scale",
+                capture_source="auto_zoom_capture",
+                tile_info=tile_info,
+                collision_unwalkable=[],
+                collision_scale=scale,
+                extra_meta={
+                    "sync_group": self.minimap_zoom_sync_group,
+                    "zoom_capture_session": os.path.basename(self.minimap_zoom_session_dir or ""),
+                    "zoom_capture_order": int(len(self.minimap_zoom_captured_order)),
+                },
+            )
 
         if all(s in self.minimap_zoom_captured for s in self.minimap_zoom_target_scales):
             self.stop_minimap_zoom_recording(reason="all_scales_captured")
@@ -1184,6 +1323,120 @@ class Bot:
             filtered.append((mx, my))
             
         return filtered
+
+    def _compute_walkable_reachability(self, grid):
+        """
+        BFS over local 15x11 grid from player tile.
+        Uses 8-way movement with anti-corner-cutting on diagonals.
+        """
+        if grid is None:
+            return None
+        if grid.shape[0] != 11 or grid.shape[1] != 15:
+            return None
+
+        reachable = np.zeros((11, 15), dtype=bool)
+        p_row, p_col = 5, 7
+
+        def is_walkable(r, c):
+            return 0 <= r < 11 and 0 <= c < 15 and int(grid[r, c]) != 1
+
+        if not is_walkable(p_row, p_col):
+            return reachable
+
+        queue = deque([(p_row, p_col)])
+        reachable[p_row, p_col] = True
+        dirs = [
+            (-1, 0), (1, 0), (0, -1), (0, 1),
+            (-1, -1), (-1, 1), (1, -1), (1, 1),
+        ]
+
+        while queue:
+            r, c = queue.popleft()
+            for dr, dc in dirs:
+                nr, nc = r + dr, c + dc
+                if not is_walkable(nr, nc) or reachable[nr, nc]:
+                    continue
+                if dr != 0 and dc != 0:
+                    # Prevent diagonal leak through corner walls.
+                    if not (is_walkable(r + dr, c) and is_walkable(r, c + dc)):
+                        continue
+                reachable[nr, nc] = True
+                queue.append((nr, nc))
+        return reachable
+
+    def update_monster_reachability(self):
+        """
+        Classifies on-screen monsters as reachable/unreachable using local collision map.
+        """
+        positions = list(getattr(self, "monster_positions", []) or [])
+        if not positions:
+            self.monster_positions_reachable = []
+            self.monster_positions_unreachable = []
+            self.monster_count_screen = 0
+            self.monster_count_reachable = 0
+            self.monster_count_unreachable = 0
+            return
+
+        tile_w = max(1, int(self.s_GameScreen.tile_w))
+        tile_h = max(1, int(self.s_GameScreen.tile_h))
+        base_grid = self.collision_grid if self.collision_grid is not None else self.raw_collision_grid
+        reachable_mask = self._compute_walkable_reachability(base_grid)
+
+        reachable_positions = []
+        unreachable_positions = []
+        for mx, my in positions:
+            m_col = int(mx // tile_w)
+            m_row = int(my // tile_h)
+            if not (0 <= m_row < 11 and 0 <= m_col < 15):
+                reachable_positions.append((mx, my))
+                continue
+
+            if reachable_mask is None:
+                reachable_positions.append((mx, my))
+                continue
+
+            if reachable_mask[m_row, m_col]:
+                reachable_positions.append((mx, my))
+                continue
+
+            # Grace path for noisy cells: if monster landed on a blocked sample,
+            # still treat as reachable when any adjacent walkable tile is reachable.
+            adj_reachable = False
+            for dr in (-1, 0, 1):
+                for dc in (-1, 0, 1):
+                    if dr == 0 and dc == 0:
+                        continue
+                    rr = m_row + dr
+                    cc = m_col + dc
+                    if 0 <= rr < 11 and 0 <= cc < 15 and reachable_mask[rr, cc]:
+                        adj_reachable = True
+                        break
+                if adj_reachable:
+                    break
+
+            if adj_reachable:
+                reachable_positions.append((mx, my))
+            else:
+                unreachable_positions.append((mx, my))
+
+        self.monster_positions_reachable = reachable_positions
+        self.monster_positions_unreachable = unreachable_positions
+        self.monster_count_screen = int(len(positions))
+        self.monster_count_reachable = int(len(reachable_positions))
+        self.monster_count_unreachable = int(len(unreachable_positions))
+
+    def get_effective_monster_count_for_cavebot(self):
+        """
+        Cavebot count policy:
+        - If we see monsters on screen, trust only reachable on-screen count.
+        - If screen has none, fallback to battle list count.
+        """
+        screen_total = int(getattr(self, "monster_count_screen", len(getattr(self, "monster_positions", []) or [])))
+        reachable = int(getattr(self, "monster_count_reachable", screen_total))
+        battle = int(getattr(self, "monster_count_battlelist", 0))
+        if screen_total > 0:
+            return max(0, reachable)
+        return max(0, battle, reachable)
     
     def getMonstersAround(self, area, test=True, test2=False):
         count = 0
@@ -2388,6 +2641,141 @@ class Bot:
             json.dump(data, f, indent=4)
 
         print(f"[DATA] Saved {img_filename} with {len(name_positions)} name labels.")
+
+    def _save_unwalkable_sample_from_frames(
+        self,
+        game_img,
+        map_img,
+        scale=None,
+        scale_source="detected",
+        capture_source="manual",
+        tile_info=None,
+        collision_unwalkable=None,
+        collision_scale=None,
+        extra_meta=None,
+    ):
+        if game_img is None or map_img is None:
+            print("[UNW DATA] Failed to save sample: missing game/minimap image.")
+            return None
+
+        save_dir = os.path.join(self.base_directory, "training_data", "unwalkable_samples")
+        os.makedirs(save_dir, exist_ok=True)
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        game_filename = f"{timestamp}_game.png"
+        map_filename = f"{timestamp}_minimap.png"
+        json_filename = f"{timestamp}.json"
+
+        game_path = os.path.join(save_dir, game_filename)
+        map_path = os.path.join(save_dir, map_filename)
+        json_path = os.path.join(save_dir, json_filename)
+
+        if scale is None:
+            try:
+                scale = int(self.detect_minimap_scale(map_img))
+                scale_source = "detected"
+            except Exception:
+                scale = int(max(1, getattr(self, "map_scale", 2)))
+                scale_source = "runtime_fallback"
+        scale = int(max(1, scale))
+
+        if tile_info is None:
+            tile_info = self._extract_tile_sets_from_map(map_img, scale)
+        if collision_unwalkable is None:
+            collision_unwalkable = []
+        if collision_scale is None:
+            collision_scale = int(scale)
+
+        cv2.imwrite(game_path, game_img)
+        cv2.imwrite(map_path, map_img)
+
+        auto_unw = tile_info.get("unwalkable", [])
+        auto_tp = tile_info.get("tp", [])
+        data = {
+            "session_type": "unwalkable_sample",
+            "timestamp": timestamp,
+            "zoom_level": int(scale),
+            "zoom_level_source": str(scale_source),
+            "sync_gold": bool(self._bool_value(getattr(self, "unwalkable_sync_gold", False))),
+            "quality_tag": "sync_gold" if bool(self._bool_value(getattr(self, "unwalkable_sync_gold", False))) else "regular",
+            "capture_source": str(capture_source),
+            "files": {
+                "game_screen": game_filename,
+                "minimap": map_filename,
+            },
+            "map_scale": int(scale),
+            "map_scale_runtime": int(max(1, getattr(self, "map_scale", scale))),
+            "map_region": [int(v) for v in self.s_Map.region],
+            "game_region": [int(v) for v in self.s_GameScreen.region],
+            "auto": {
+                "unwalkable": auto_unw,
+                "tp": auto_tp,
+                "collision_unwalkable": list(collision_unwalkable),
+                "anchor_dx": int(tile_info.get("anchor_dx", 0)),
+                "anchor_dy": int(tile_info.get("anchor_dy", 0)),
+                "collision_scale": int(collision_scale),
+            },
+            # Editable ground-truth labels, seeded from auto detection to reduce manual work.
+            "labels": {
+                "unwalkable": list(auto_unw),
+                "tp": list(auto_tp),
+            },
+        }
+        if isinstance(extra_meta, dict):
+            for k, v in extra_meta.items():
+                if k in data:
+                    continue
+                data[k] = v
+
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=True)
+
+        print(
+            f"[UNW DATA] Saved sample {json_filename} "
+            f"(src={capture_source} auto_unw={len(auto_unw)} auto_tp={len(auto_tp)} coll_unw={len(collision_unwalkable)})"
+        )
+        return json_filename
+
+    def capture_unwalkable_sample(self):
+        """
+        Saves one offline sample for minimap unwalkable-tile annotation:
+        - game_screen image
+        - minimap image
+        - auto-detected tiles (unwalkable/tp) and collision-grid tiles
+        Output:
+          training_data/unwalkable_samples/<timestamp>_{game|minimap}.png
+          training_data/unwalkable_samples/<timestamp>.json
+        """
+        game_img = img.screengrab_array(self.hwnd, self.s_GameScreen.region)
+        map_img = img.screengrab_array(self.hwnd, self.s_Map.region)
+        if game_img is None or map_img is None:
+            print("[UNW DATA] Failed to capture images (game/minimap).")
+            return
+
+        try:
+            scale = int(self.detect_minimap_scale(map_img))
+            scale_source = "detected"
+        except Exception:
+            scale = int(max(1, getattr(self, "map_scale", 2)))
+            scale_source = "runtime_fallback"
+        scale = int(max(1, scale))
+
+        tile_info = self._extract_tile_sets_from_map(map_img, scale)
+        coll_grid, coll_scale = self.get_local_collision_map()
+        coll_unw = []
+        if coll_grid is not None:
+            ys, xs = np.where(coll_grid == 1)
+            coll_unw = sorted([[int(r), int(c)] for r, c in zip(ys.tolist(), xs.tolist())])
+        self._save_unwalkable_sample_from_frames(
+            game_img=game_img,
+            map_img=map_img,
+            scale=scale,
+            scale_source=scale_source,
+            capture_source="manual",
+            tile_info=tile_info,
+            collision_unwalkable=coll_unw,
+            collision_scale=(coll_scale if coll_scale is not None else scale),
+        )
         
     def useAreaRune(self):
         """Precision Rune placement using a geometric bitmask."""
@@ -2966,7 +3354,7 @@ class Bot:
         Lure dinámico: Si una marca no es visible, busca la siguiente en la secuencia.
         Siempre prioriza terminar el ciclo volviendo a 'skull'.
         """
-        self.monster_count = self.monsterCount()
+        self.monster_count = self.get_effective_monster_count_for_cavebot()
         marks = self.getClosestMarks() # Busca la marca actual (self.current_mark)
         
         # --- ESTADO 1: TANQUEANDO / ESPERANDO EN SKULL ---
@@ -3035,7 +3423,7 @@ class Bot:
         self._sync_mark_cycle()
         # 1. Update basic state for this frame
         marks = self.getClosestMarks()
-        self.monster_count = self.monsterCount() # Ensure this is fresh
+        self.monster_count = self.get_effective_monster_count_for_cavebot()
         kill_time = time.time() - self.kill_start_time
         
         # --- 2. STATE MACHINE (Toggle Kill Mode) ---
@@ -3421,6 +3809,8 @@ class Bot:
         # Clear lap-memory state to truly reset history behavior.
         self.visited_history.clear()
         self.visited_fingerprints = []
+        self.only_visited_last_mark = None
+        self.only_visited_streak = 0
         self.discovery_mode = True
         self.next_mark_eligible_ms = 0
            
@@ -3462,6 +3852,8 @@ class Bot:
             self.current_mark_index = 0
             
         self.current_mark = self.mark_list[self.current_mark_index]
+        self.only_visited_last_mark = None
+        self.only_visited_streak = 0
         print(f"[CAVEBOT] Next target mark: {self.current_mark}")
         self.next_mark_eligible_ms = timeInMillis() + 450
         
@@ -3541,12 +3933,31 @@ class Bot:
                     dist = distance.euclidean(map_rel_center, (rel_x, rel_y))
                     visited_candidates.append((dist, (map_region[0] + rel_x, map_region[1] + rel_y), (rel_x, rel_y)))
 
-        # Permissive skull fallback:
-        # If skull is the active target and every visible skull was marked "visited this lap",
-        # still allow navigating to the closest visible skull.
-        if not result and self.current_mark == "skull" and visited_candidates:
-            visited_candidates.sort(key=lambda x: x[0])
-            result = [visited_candidates[0]]
+        fallback_used = False
+        fallback_waiting = False
+        fallback_streak = 0
+        fallback_needed = max(1, int(getattr(self, "only_visited_confirm_scans", 3)))
+
+        if result:
+            self.only_visited_last_mark = None
+            self.only_visited_streak = 0
+        elif visited_candidates:
+            if self.only_visited_last_mark == self.current_mark:
+                self.only_visited_streak += 1
+            else:
+                self.only_visited_last_mark = self.current_mark
+                self.only_visited_streak = 1
+
+            fallback_streak = int(self.only_visited_streak)
+            if self.only_visited_streak >= fallback_needed:
+                visited_candidates.sort(key=lambda x: x[0])
+                result = [visited_candidates[0]]
+                fallback_used = True
+            else:
+                fallback_waiting = True
+        else:
+            self.only_visited_last_mark = None
+            self.only_visited_streak = 0
 
         self.last_mark_scan_info = {
             "mark": self.current_mark,
@@ -3554,10 +3965,16 @@ class Bot:
             "visible_count": int(len(positions) if positions else 0),
             "candidate_count": int(len(result)),
             "visited_count": int(len(visited_candidates)),
+            "fallback_waiting": bool(fallback_waiting),
+            "fallback_used": bool(fallback_used),
+            "fallback_streak": int(fallback_streak),
+            "fallback_needed": int(fallback_needed),
         }
         self._cavebot_log(
             f"scan mark={self.current_mark} thr={mark_thr:.2f} visible={len(positions) if positions else 0} "
-            f"candidates={len(result)} visited={len(visited_candidates)}",
+            f"candidates={len(result)} visited={len(visited_candidates)} "
+            f"fb_wait={int(fallback_waiting)} fb_used={int(fallback_used)} "
+            f"fb={fallback_streak}/{fallback_needed}",
             throttle_ms=250,
         )
 
@@ -4157,6 +4574,80 @@ class Bot:
                     | terrain[:, 2].astype(np.uint32)
                 )
 
+            def detect_scale_from_center_runwidth():
+                """
+                Center-focused estimator:
+                - Ignore black/unknown chunks by only accepting terrain colors.
+                - Measure same-color run widths on horizontal/vertical strips.
+                - Infer scale from dominant smallest reliable run width.
+                """
+                # Build strips near player cross only (high-confidence discovered area).
+                local_strips = []
+                y_offs = [-30, -18, -8, 0, 8, 18, 30]
+                x_offs = [-32, -20, -10, 0, 10, 20, 32]
+                for dy in y_offs:
+                    yy = int(np.clip(cy + dy, 0, mh - 1))
+                    xs0, xs1 = max(0, cx - 72), min(mw, cx + 72)
+                    strip = map_img[yy, xs0:xs1]
+                    if strip.size > 0:
+                        local_strips.append(strip)
+                for dx in x_offs:
+                    xx = int(np.clip(cx + dx, 0, mw - 1))
+                    ys0, ys1 = max(0, cy - 56), min(mh, cy + 56)
+                    strip = map_img[ys0:ys1, xx].reshape(-1, 3)
+                    if strip.size > 0:
+                        local_strips.append(strip)
+
+                run_lengths = []
+                for strip in local_strips:
+                    if strip.size == 0 or len(strip) < 3:
+                        continue
+                    codes = (
+                        (strip[:, 0].astype(np.uint32) << 16)
+                        | (strip[:, 1].astype(np.uint32) << 8)
+                        | strip[:, 2].astype(np.uint32)
+                    )
+                    is_terrain = np.isin(codes, self._terrain_codes_u32, assume_unique=False)
+                    if int(np.count_nonzero(is_terrain)) < 6:
+                        continue
+                    i = 0
+                    n = len(codes)
+                    while i < n:
+                        if not is_terrain[i]:
+                            i += 1
+                            continue
+                        c0 = int(codes[i])
+                        j = i + 1
+                        while j < n and is_terrain[j] and int(codes[j]) == c0:
+                            j += 1
+                        ln = j - i
+                        # Keep plausible tile-width runs.
+                        if 1 <= ln <= 8:
+                            run_lengths.append(int(ln))
+                        i = j
+
+                if len(run_lengths) < 12:
+                    return None
+
+                counts = Counter(run_lengths)
+                one_hits = int(counts.get(1, 0))
+                two_hits = int(counts.get(2, 0) + counts.get(3, 0))
+                four_hits = int(counts.get(4, 0) + counts.get(5, 0) + counts.get(6, 0))
+                total = int(sum(counts.values()))
+                if total <= 0:
+                    return None
+
+                # Strong x1 evidence must dominate.
+                if one_hits >= max(10, int(0.18 * total)) and one_hits >= int(1.20 * max(two_hits, four_hits)):
+                    return 1
+                # x2 evidence over x4/1.
+                if two_hits >= max(8, int(0.14 * total)) and two_hits >= int(0.90 * four_hits):
+                    return 2
+                # x4 needs enough 4-ish runs and low x1 pressure.
+                if four_hits >= max(6, int(0.10 * total)) and one_hits <= int(0.60 * four_hits):
+                    return 4
+                return None
+
             def decide_scale(distances):
                 if len(distances) < 3:
                     return None
@@ -4191,6 +4682,17 @@ class Bot:
                     distances.extend(diffs.tolist())
 
             new_scale = decide_scale(distances)
+            run_scale = detect_scale_from_center_runwidth()
+
+            # If center run-width estimator is available and disagrees in black-heavy scenes,
+            # trust it because edge spacing is unstable with large black/undiscovered chunks.
+            center_roi = map_img[max(0, cy - 60):min(mh, cy + 60), max(0, cx - 80):min(mw, cx + 80)]
+            black_ratio = 0.0
+            if center_roi.size > 0:
+                black_mask = np.all(center_roi <= np.array([8, 8, 8], dtype=np.uint8), axis=-1)
+                black_ratio = float(np.mean(black_mask))
+            if run_scale is not None and (new_scale is None or (black_ratio >= 0.55 and int(run_scale) != int(new_scale))):
+                new_scale = int(run_scale)
 
             # Safety fallback: old loop implementation only when vectorized path is ambiguous.
             if new_scale is None:
@@ -4210,6 +4712,8 @@ class Bot:
                                         distances.append(d)
                                 last_idx = i
                 new_scale = decide_scale(distances)
+                if new_scale is None and run_scale is not None:
+                    new_scale = int(run_scale)
 
             if new_scale is None:
                 return self.map_scale
@@ -4425,6 +4929,106 @@ class Bot:
             return center_from_cross
         return self._estimate_grid_center_from_transitions(map_img, S)
 
+    def _shift_memory_grid(self, mem, dr, dc, fill_value=-1):
+        out = np.full_like(mem, fill_value)
+        src_r0 = max(0, -dr)
+        src_r1 = min(mem.shape[0], mem.shape[0] - dr)
+        src_c0 = max(0, -dc)
+        src_c1 = min(mem.shape[1], mem.shape[1] - dc)
+        dst_r0 = max(0, dr)
+        dst_r1 = min(mem.shape[0], mem.shape[0] + dr)
+        dst_c0 = max(0, dc)
+        dst_c1 = min(mem.shape[1], mem.shape[1] + dc)
+        if src_r1 > src_r0 and src_c1 > src_c0 and dst_r1 > dst_r0 and dst_c1 > dst_c0:
+            out[dst_r0:dst_r1, dst_c0:dst_c1] = mem[src_r0:src_r1, src_c0:src_c1]
+        return out
+
+    def _detect_cross_occluded_tiles(self, local_data, scale):
+        rad = 1 if int(scale) >= 4 else 2
+        rr = np.arange(11).reshape(-1, 1)
+        cc = np.arange(15).reshape(1, -1)
+        near_center = (np.abs(rr - 5) <= rad) & (np.abs(cc - 7) <= rad)
+        # Treat the center cross neighborhood as potentially occluded at all times.
+        # White-only masks are too brittle across zoom/client themes.
+        occluded = near_center.copy()
+        occluded[5, 7] = True
+        return occluded
+
+    def _apply_minimap_tile_memory(self, map_img, local_data, is_obstacle, is_yellow, scale):
+        t0 = time.perf_counter()
+        mem = np.array(getattr(self, "minimap_tile_memory", np.full((11, 15), -1, dtype=np.int8)), copy=True)
+        mem_y = np.array(getattr(self, "minimap_yellow_memory", np.full((11, 15), -1, dtype=np.int8)), copy=True)
+        prev_map = getattr(self, "minimap_memory_prev_map", None)
+        prev_scale = int(getattr(self, "minimap_memory_prev_scale", 0))
+        S = int(max(1, scale))
+        dr = 0
+        dc = 0
+
+        if prev_map is None or prev_scale != S:
+            mem[:] = -1
+            mem_y[:] = -1
+        else:
+            try:
+                map_delta = float(np.mean(cv2.absdiff(map_img, prev_map)))
+                dx, dy, conf, _method, valid, _reason = self._estimate_minimap_motion(
+                    prev_map,
+                    map_img,
+                    max_shift=max(6, S * 4),
+                    map_delta=map_delta,
+                )
+                if valid and conf >= 0.50:
+                    dc = int(np.clip(round(float(dx) / float(S)), -3, 3))
+                    dr = int(np.clip(round(float(dy) / float(S)), -3, 3))
+                    if dr != 0 or dc != 0:
+                        mem = self._shift_memory_grid(mem, dr, dc, fill_value=-1)
+                        mem_y = self._shift_memory_grid(mem_y, dr, dc, fill_value=-1)
+                elif map_delta >= 38.0:
+                    # Floor change / discontinuity: discard stale local map memory.
+                    mem[:] = -1
+                    mem_y[:] = -1
+            except Exception:
+                pass
+
+        occluded = self._detect_cross_occluded_tiles(local_data, S)
+        recover_yellow_mask = occluded & (mem_y == 1)
+        is_yellow[recover_yellow_mask] = True
+
+        recover_obstacle_mask = occluded & (~is_yellow) & (mem == 1)
+        is_obstacle[recover_obstacle_mask] = True
+        is_obstacle[is_yellow] = False
+
+        observe_all = ~occluded
+        observe_non_yellow = observe_all & (~is_yellow)
+        mem[observe_non_yellow] = is_obstacle[observe_non_yellow].astype(np.int8)
+        mem_y[observe_all] = is_yellow[observe_all].astype(np.int8)
+        mem[5, 7] = 0
+        mem_y[5, 7] = 0
+
+        self.minimap_tile_memory = mem
+        self.minimap_yellow_memory = mem_y
+        self.minimap_memory_prev_map = map_img.copy()
+        self.minimap_memory_prev_scale = int(S)
+        self.minimap_memory_occluded_count = int(np.count_nonzero(occluded))
+        self.minimap_memory_recovered_count = int(np.count_nonzero(recover_obstacle_mask))
+        self.minimap_memory_recovered_yellow_count = int(np.count_nonzero(recover_yellow_mask))
+        self.minimap_memory_shift_rc = (int(dr), int(dc))
+        self.minimap_memory_last_ms = float((time.perf_counter() - t0) * 1000.0)
+
+        if self._is_log_enabled("perf"):
+            now_ms = timeInMillis()
+            if (now_ms - int(getattr(self, "last_minimap_memory_log_ms", 0))) >= 600:
+                self.last_minimap_memory_log_ms = now_ms
+                print(
+                    "[PERF] minimap_memory "
+                    f"dt={self.minimap_memory_last_ms:.2f}ms "
+                    f"occ={self.minimap_memory_occluded_count} "
+                    f"rec_obs={self.minimap_memory_recovered_count} "
+                    f"rec_y={self.minimap_memory_recovered_yellow_count} "
+                    f"shift=({dr},{dc})"
+                )
+
+        return is_obstacle, is_yellow
+
     def _extract_tile_sets_from_local_data(self, local_data):
         """Returns unwalkable/tp tile sets from 15x11 sampled minimap data."""
         OBS = np.array(BotConstants.OBSTACLES, dtype=np.uint8)
@@ -4494,7 +5098,7 @@ class Bot:
         S = int(max(1, self.map_scale))
         mh, mw = map_img.shape[:2]
         cx, cy = self._resolve_minimap_sampling_center(map_img, S)
-        # Revert to direct center-grid sampling (pre-anchor heuristic behavior).
+        # Runtime path: use resolved center directly to avoid phase-jump tile shifts.
         local_data = np.zeros((11, 15, 3), dtype=np.uint8)
         for r in range(11):
             for c in range(15):
@@ -4529,6 +5133,14 @@ class Bot:
                 if is_yellow[r, c]:
                     is_obstacle[r, c] = False
                     is_low_conf[r, c] = False
+
+        is_obstacle, is_yellow = self._apply_minimap_tile_memory(
+            map_img=map_img,
+            local_data=local_data,
+            is_obstacle=is_obstacle,
+            is_yellow=is_yellow,
+            scale=S,
+        )
 
         # Low-confidence cluster heuristic:
         # Treat as blocked only if connected cluster size is small (<=3 tiles).
@@ -4566,7 +5178,16 @@ class Bot:
         # 5. Apply 3-Point Connectivity interpolation (Preserved)
         # We KEEP this because it connects detected obstacles to form solid walls
         if S == 1:
-            grid[5:7, 5:11] = 0; grid[3:9, 7:9] = 0; grid[5, 7] = 3
+            # Keep anti-cross cleanup, but never erase tiles already classified as blocked.
+            for rr in range(5, 7):
+                for cc in range(5, 11):
+                    if not is_obstacle[rr, cc]:
+                        grid[rr, cc] = 0
+            for rr in range(3, 9):
+                for cc in range(7, 9):
+                    if not is_obstacle[rr, cc]:
+                        grid[rr, cc] = 0
+            grid[5, 7] = 3
             for c in [5, 6]: # WEST
                 if grid[4, c] == 1 and grid[7, c] == 1 and is_obstacle[5:7, c-1].all():
                     grid[5:7, c] = 1
@@ -4581,7 +5202,10 @@ class Bot:
                     grid[r, 7:9] = 1
         else:
             # Scale 2 and 4 interpolation
-            grid[4, 7] = 0; grid[6, 7] = 0; grid[5, 6] = 0; grid[5, 8] = 0
+            if not is_obstacle[4, 7]: grid[4, 7] = 0
+            if not is_obstacle[6, 7]: grid[6, 7] = 0
+            if not is_obstacle[5, 6]: grid[5, 6] = 0
+            if not is_obstacle[5, 8]: grid[5, 8] = 0
             if is_obstacle[3, 7] and grid[4, 6] == 1 and grid[4, 8] == 1: grid[4, 7] = 1
             if is_obstacle[7, 7] and grid[6, 6] == 1 and grid[6, 8] == 1: grid[6, 7] = 1
             if is_obstacle[5, 5] and grid[4, 6] == 1 and grid[6, 6] == 1: grid[5, 6] = 1
@@ -4619,18 +5243,15 @@ class Bot:
             map_img = img.screengrab_array(self.hwnd, self.s_Map.region)
             if map_img is not None:
                 s = int(max(1, self.map_scale))
-                mh, mw = map_img.shape[:2]
-                mcx, mcy = self._resolve_minimap_sampling_center(map_img, s)
-                # Use the same center-based sampling origin as collision extraction.
-                local_data = np.zeros((11, 15, 3), dtype=np.uint8)
-                for gr in range(11):
-                    for gc in range(15):
-                        px = mcx + (gc - 7) * s
-                        py = mcy + (gr - 5) * s
-                        if 0 <= px < mw and 0 <= py < mh:
-                            local_data[gr, gc] = map_img[py, px]
+                # Use the exact same phase-stable sampling as collision extraction.
+                local_data, _mcx, _mcy, _adx, _ady = self._sample_minimap_grid(map_img, s)
                 yellow_local = self._yellow_mask_bgr(local_data, tol=12)
                 ys, xs = np.where(yellow_local)
+                for gr, gc in zip(ys.tolist(), xs.tolist()):
+                    tp_tiles.add((int(gr), int(gc)))
+            mem_y = getattr(self, "minimap_yellow_memory", None)
+            if mem_y is not None and isinstance(mem_y, np.ndarray) and mem_y.shape == (11, 15):
+                ys, xs = np.where(mem_y == 1)
                 for gr, gc in zip(ys.tolist(), xs.tolist()):
                     tp_tiles.add((int(gr), int(gc)))
 
@@ -4655,6 +5276,10 @@ class Bot:
                     cv2.rectangle(vis, (tx, ty), (tx2, ty2), (45, 45, 45), 1)
 
             # --- DRAW MONSTERS ---
+            unreachable_tiles = set()
+            for mx, my in getattr(self, "monster_positions_unreachable", []) or []:
+                unreachable_tiles.add((int(my / tile_h_float), int(mx / tile_w_float)))
+
             if hasattr(self, 'monster_positions') and self.monster_positions:
                 for mx, my in self.monster_positions:
                     m_col = int(mx / tile_w_float)
@@ -4669,8 +5294,12 @@ class Bot:
                     if m_col == p_col and m_row == p_row:
                         continue
                         
-                    cv2.rectangle(overlay, (tx, ty), (tx2, ty2), (0, 0, 150), -1)
-                    cv2.circle(vis, (int(mx), int(my)), 2, (0, 255, 0), -1)
+                    if (m_row, m_col) in unreachable_tiles:
+                        cv2.rectangle(overlay, (tx, ty), (tx2, ty2), (0, 120, 220), -1)
+                        cv2.circle(vis, (int(mx), int(my)), 2, (0, 165, 255), -1)
+                    else:
+                        cv2.rectangle(overlay, (tx, ty), (tx2, ty2), (0, 0, 150), -1)
+                        cv2.circle(vis, (int(mx), int(my)), 2, (0, 255, 0), -1)
             # DRAW RUNE TARGETING (If any monsters detected)
             if hasattr(self, 'best_rune_tile') and self.best_rune_tile:
                 tr, tc = self.best_rune_tile
@@ -4699,6 +5328,29 @@ class Bot:
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.45,
                 (0, 255, 120),
+                1,
+            )
+            cv2.putText(
+                vis,
+                f"Monsters reachable/unreachable: {int(getattr(self, 'monster_count_reachable', 0))}/"
+                f"{int(getattr(self, 'monster_count_unreachable', 0))}",
+                (10, 96),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (0, 200, 255),
+                1,
+            )
+            mem_occ = int(getattr(self, "minimap_memory_occluded_count", 0))
+            mem_rec = int(getattr(self, "minimap_memory_recovered_count", 0))
+            mem_rec_y = int(getattr(self, "minimap_memory_recovered_yellow_count", 0))
+            mem_dr, mem_dc = getattr(self, "minimap_memory_shift_rc", (0, 0))
+            cv2.putText(
+                vis,
+                f"MM memory occ={mem_occ} rec_obs={mem_rec} rec_y={mem_rec_y} shift=({int(mem_dr)},{int(mem_dc)})",
+                (10, 118),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.42,
+                (255, 210, 120),
                 1,
             )
             if self.vocation == "knight" and hasattr(self, "amp_res_debug") and self.amp_res_debug:

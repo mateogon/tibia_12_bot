@@ -24,6 +24,11 @@ Keep datasets in `training_data/` at repo root.
 - `tools/check_zoom_detect_on_sessions.py`
   - Quick sanity check for zoom detector outputs across prepared zoom sessions.
 
+- `tools/evaluate_minimap_zoom_samples.py`
+  - Sweeps many zoom-detector variants on manually labeled `training_data/minimap_zoom_samples/*.json`.
+  - Reports top methods overall, by zoom (x1/x2/x4), and high-black minimap performance.
+  - Can optionally include labeled images from `training_data/minimap_zoom_sets/*/metadata.json`.
+
 - `tools/simulate_cavebot_marks.py`
   - Replays cavebot sessions and evaluates mark-follow behavior and accuracy.
 
@@ -38,6 +43,16 @@ Keep datasets in `training_data/` at repo root.
 
 - `tools/annotation_tool.py`
   - Manual annotation editor for `training_data/*.json` coordinates.
+
+- `tools/unwalkable_annotation_tool.py`
+  - Manual tile-grid editor for `training_data/unwalkable_samples/*.json` using saved minimap/game snapshots and auto-detected unwalkable tiles as a starting point.
+
+- `tools/evaluate_unwalkable_samples.py`
+  - Evaluates `auto.unwalkable` and `auto.collision_unwalkable` against `labels.unwalkable` on `training_data/unwalkable_samples/*.json`.
+  - Reports precision/recall/F1 by zoom and tile hot-spots (FN/FP).
+
+- `tools/report_unwalkable_sample.py`
+  - Detailed diff report for one sample (lists FN/FP tile coordinates for auto and collision predictions).
 
 - `tools/fix_coordinates.py`
   - Batch coordinate correction utility for labeled training files.
@@ -67,6 +82,10 @@ python tools/sweep_minimap_anchor_methods.py --sessions training_data/minimap_zo
 
 python tools/check_zoom_detect_on_sessions.py
 
+python tools/evaluate_minimap_zoom_samples.py --samples-dir training_data/minimap_zoom_samples --sync-gold-only --details --top 15
+python tools/evaluate_minimap_zoom_samples.py --samples-dir training_data/minimap_zoom_samples --sync-gold-only --optimize x2_focus --x2-weight 3.0 --top 25 --details
+python tools/evaluate_minimap_zoom_samples.py --samples-dir training_data/minimap_zoom_samples --sync-gold-only --eval-runtime-current --exhaustive --optimize balanced --min-z1-acc 0.70 --min-z2-acc 0.50 --min-z4-acc 0.70 --top 40 --details
+
 python tools/simulate_cavebot_marks.py --session training_data/cavebot_sessions/20260302_024100
 
 python tools/evaluate_monster_detector.py --data training_data --label-space name --match-distance 25 --sweep-offset --radius 12
@@ -74,4 +93,10 @@ python tools/evaluate_monster_detector.py --data training_data --label-space nam
 python tools/detect_monsters.py --compare --runs 5 --warmup 2
 
 python tools/annotation_tool.py
+
+python tools/unwalkable_annotation_tool.py
+
+python tools/evaluate_unwalkable_samples.py --data training_data/unwalkable_samples --details
+
+python tools/report_unwalkable_sample.py --sample training_data/unwalkable_samples/<sample>.json
 ```

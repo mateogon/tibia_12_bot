@@ -36,6 +36,7 @@ class ModernBotGUI:
         self.rec_status_label = None
         self.zoom_record_btn = None
         self.zoom_rec_status_label = None
+        self.unreachable_status_label = None
 
 
         # Start Loops
@@ -72,7 +73,9 @@ class ModernBotGUI:
             "visualize_battlelist",
             "cavebot_record_interval_ms",
             "cavebot_record_zoom_label",
+            "auto_zoom_capture_unwalkable",
             "auto_sell_stone_interval_s",
+            "unwalkable_sync_gold",
             "log_enabled", "log_actions", "log_perf",
         ]
         
@@ -302,6 +305,12 @@ class ModernBotGUI:
         f_logic = self._create_section(parent, "Stop Conditions")
         self._entry_row(f_logic, "Stop when X Monsters Left:", "kill_stop_amount")
         self._entry_row(f_logic, "Kill Amount (Batch):", "kill_amount")
+        self.unreachable_status_label = ctk.CTkLabel(
+            f_logic,
+            text="Reachability: reachable 0 | unreachable 0 | cavebot 0",
+            text_color="#9FA8DA",
+        )
+        self.unreachable_status_label.pack(anchor="w", padx=10, pady=(2, 8))
 
         # 6. Hotkeys Info Section
         f_hotkeys = self._create_section(parent, "Hotkeys")
@@ -395,9 +404,15 @@ class ModernBotGUI:
             text="Flow: click Start -> switch Tibia zooms (any order) -> auto-stop after x1/x2/x4.",
             text_color="#9FA8DA",
         ).pack(anchor="w", padx=10, pady=(0, 6))
+        self._switch(f_lab, "Auto-save Unwalkable Samples During Zoom Capture", "auto_zoom_capture_unwalkable")
         ctk.CTkLabel(
             f_lab,
             text="Zoom output: training_data/minimap_zoom_sets/<session>/",
+            text_color="#9FA8DA",
+        ).pack(anchor="w", padx=10, pady=(0, 6))
+        ctk.CTkLabel(
+            f_lab,
+            text="Unwalkable output (if enabled): training_data/unwalkable_samples/",
             text_color="#9FA8DA",
         ).pack(anchor="w", padx=10, pady=(0, 6))
         goal_row = ctk.CTkFrame(f_lab, fg_color="transparent")
@@ -443,9 +458,43 @@ class ModernBotGUI:
         self._update_recording_indicator()
 
         f_snap = self._create_section(parent, "Developer Tools")
+        self._switch(f_snap, "Mark Unwalkable Captures As Sync Gold", "unwalkable_sync_gold")
         ctk.CTkButton(f_snap, text="Save Snapshot (Training Data)",
                       command=self.bot.capture_training_data,
                       fg_color="#4B0082").pack(fill="x", padx=10, pady=10)
+        ctk.CTkButton(
+            f_snap,
+            text="Save Unwalkable Sample",
+            command=self.bot.capture_unwalkable_sample,
+            fg_color="#22577A",
+            hover_color="#2D6A8F",
+        ).pack(fill="x", padx=10, pady=(0, 10))
+        zoom_sample_row = ctk.CTkFrame(f_snap, fg_color="transparent")
+        zoom_sample_row.pack(fill="x", padx=10, pady=(0, 4))
+        ctk.CTkLabel(zoom_sample_row, text="Manual Zoom Label:", width=130, anchor="w").pack(side="left")
+        self.zoom_sample_label_var = ctk.StringVar(
+            value=str(getattr(self.bot.cavebot_record_zoom_label, "get", lambda: 1)() or 1)
+        )
+        if self.zoom_sample_label_var.get() not in ("1", "2", "4"):
+            self.zoom_sample_label_var.set("1")
+        ctk.CTkOptionMenu(
+            zoom_sample_row,
+            values=["1", "2", "4"],
+            variable=self.zoom_sample_label_var,
+            width=110,
+        ).pack(side="left", padx=6)
+        ctk.CTkButton(
+            f_snap,
+            text="Save Minimap Zoom Sample",
+            command=lambda: self.bot.capture_minimap_zoom_sample(int(self.zoom_sample_label_var.get())),
+            fg_color="#3B5F8A",
+            hover_color="#4B74A6",
+        ).pack(fill="x", padx=10, pady=(0, 10))
+        ctk.CTkLabel(
+            f_snap,
+            text="Zoom sample output: training_data/minimap_zoom_samples/",
+            text_color="#9FA8DA",
+        ).pack(anchor="w", padx=10, pady=(0, 8))
 
     # --- WIDGET HELPERS ---
     def _switch(self, parent, text, var_key):
@@ -737,6 +786,16 @@ class ModernBotGUI:
             self.zoom_record_btn.configure(
                 text="Stop Auto Zoom Capture" if zoom_on else "Start Auto Zoom Capture (x1/x2/x4)",
                 fg_color="#6B2E2E" if zoom_on else "#1F4D7A",
+            )
+        if self.unreachable_status_label is not None:
+            reachable = int(getattr(self.bot, "monster_count_reachable", 0))
+            unreachable = int(getattr(self.bot, "monster_count_unreachable", 0))
+            cavebot_count = int(getattr(self.bot, "monster_count_effective", 0))
+            self.unreachable_status_label.configure(
+                text=(
+                    f"Reachability: reachable {reachable} | "
+                    f"unreachable {unreachable} | cavebot {cavebot_count}"
+                )
             )
         if self.running:
             self._rec_status_timer_id = self.root.after(300, self._update_recording_indicator)

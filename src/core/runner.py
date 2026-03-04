@@ -78,6 +78,15 @@ class BotRunner:
         screen_count = len(self.bot.monster_positions)
         self.bot.monster_count = max(int(battle_count), int(screen_count))
 
+    def _update_monster_reachability(self) -> None:
+        t0 = time.perf_counter(); self.bot.update_monster_reachability(); self.perf.add_span("monster_reachability", t0)
+        screen_count = int(getattr(self.bot, "monster_count_screen", len(getattr(self.bot, "monster_positions", []) or [])))
+        reachable_count = int(getattr(self.bot, "monster_count_reachable", screen_count))
+        battle_count = int(getattr(self.bot, "monster_count_battlelist", 0))
+        self.bot.monster_count_effective = (
+            reachable_count if screen_count > 0 else max(battle_count, reachable_count)
+        )
+
     def _update_collision_map_if_needed(self) -> None:
         need_collision = (
             self.bot.cavebot.get()
@@ -174,6 +183,7 @@ class BotRunner:
                 t0 = time.perf_counter(); self.bot.record_cavebot_tick(); self.perf.add_span("cavebot_rec", t0)
                 self._update_monsters()
                 self._update_collision_map_if_needed()
+                self._update_monster_reachability()
                 self._run_actions()
                 self._visualize()
 
